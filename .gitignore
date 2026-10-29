@@ -36,3 +36,4 @@ verified_translations-*.tar
 /example/_build/
 /example/deps/
 /bench/app/
+/bench/last-run.txt

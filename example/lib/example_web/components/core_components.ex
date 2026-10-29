@@ -27,7 +27,8 @@ defmodule ExampleWeb.CoreComponents do
 
   """
   use Phoenix.Component
-  use VerifiedTranslations, backend: ExampleWeb.Gettext
+  use Gettext, backend: ExampleWeb.Gettext
+  use VerifiedTranslations
 
   alias Phoenix.LiveView.JS
 

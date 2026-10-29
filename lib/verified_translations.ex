@@ -1,165 +1,110 @@
 defmodule VerifiedTranslations do
   @moduledoc ~S"""
-  Compile-time verified Gettext translations.
+  Compile-time verified translations for Phoenix.
 
   Like `Phoenix.VerifiedRoutes` does for paths, the `~t` sigil verifies at
-  compile time that every message has a translation in every known locale.
-  A missing, empty or fuzzy translation (or a translation that references an
-  unknown `%{binding}`) fails compilation.
+  compile time that every message is translated to every configured locale,
+  and fails compilation otherwise:
 
-      use VerifiedTranslations, backend: MyAppWeb.Gettext
+      use VerifiedTranslations
 
       ~t"Welcome back"
-      ~t"Hello #{name}"       # msgid "Hello %{name}", bindings %{name: name}
-      ~t"Hello #{@user.name}" # msgid "Hello %{name}"
+      ~t"Hello #{name}"       # source "Hello %{name}", binding name
+      ~t"Hello #{@user.name}" # source "Hello %{name}"
 
-  `use VerifiedTranslations` also calls `use Gettext, backend: ...`, so the
-  regular Gettext macros (`gettext/1`, `ngettext/3`, ...) keep working.
+  Each message lives in its own JSON file holding all locales, so parallel
+  branches, worktrees and coding agents never conflict on translation files:
 
-  ## Options
+      // priv/translations/default/hello-name-1b2c3d4e.json
+      {
+        "msgid": "Hello %{name}",
+        "fi": "Hei %{name}",
+        "sv": "Hej %{name}"
+      }
 
-    * `:backend` (required) - the Gettext backend module.
-    * `:priv` - directory of the PO files. Must match the backend's `:priv`.
-      Defaults to `"priv/gettext"`.
-    * `:domain` - Gettext domain for `~t`. Defaults to `"default"`.
-    * `:locales` - locales that must be translated. Defaults to all locale
-      directories in `:priv`.
-    * `:source_locale` - locale whose msgstr may be empty because the msgid
-      itself is the text. Defaults to the `:gettext` `:default_locale`
-      config (usually `"en"`). Its PO entries are optional.
-    * `:allow_fuzzy` - treat `#, fuzzy` entries as translated. Defaults to `false`.
+  Translations are inlined into the calling module at compile time, so there
+  is no runtime lookup table and no Gettext backend to recompile. Editing a
+  JSON file recompiles only the modules that use that message.
 
-  Verification is skipped while running `mix gettext.extract`, so you can
-  always extract new messages:
+  ## Configuration
 
-      mix gettext.extract --merge
+      config :verified_translations,
+        locales: ["en", "fi", "sv"],
+        source_locale: "en",            # language of the text in ~t
+        path: "priv/translations",      # relative to the project root
+        create_missing: true            # write stub files for new messages
+
+  `use VerifiedTranslations` accepts the same keys (plus `:domain`, default
+  `"default"`) to override the config per module.
+
+  ## Locale
+
+  The current locale is per process, like Gettext's:
+
+      VerifiedTranslations.put_locale("fi")
+      VerifiedTranslations.with_locale("sv", fn -> ~t"Hello #{name}" end)
+
+  Unknown or unset locales render the source text.
   """
 
-  alias VerifiedTranslations.Verifier
+  alias VerifiedTranslations.Compiler
+
+  @locale_key {__MODULE__, :locale}
 
   @doc false
   defmacro __using__(opts) do
-    # expand without adding a compile-time dependency on the backend
-    backend =
-      Macro.expand(Keyword.fetch!(opts, :backend), %{__CALLER__ | function: {:__info__, 1}})
-
     module = __CALLER__.module
-    first_use? = not Module.has_attribute?(module, :__verified_translations__)
 
-    Module.put_attribute(module, :__verified_translations__, %{
-      backend: backend,
-      priv: Keyword.get(opts, :priv, "priv/gettext"),
-      domain: Keyword.get(opts, :domain, "default"),
-      locales: Keyword.get(opts, :locales),
-      source_locale: Keyword.get(opts, :source_locale),
-      allow_fuzzy: Keyword.get(opts, :allow_fuzzy, false)
-    })
-
-    if first_use? do
+    unless Module.has_attribute?(module, :__verified_translations_opts__) do
       Module.register_attribute(module, :__verified_translations_errors__, accumulate: true)
       Module.register_attribute(module, :__verified_translations_checks__, accumulate: true)
-    end
+      Module.put_attribute(module, :__verified_translations_opts__, opts)
 
-    quote do
-      use Gettext, backend: unquote(backend)
-      import VerifiedTranslations, only: [sigil_t: 2]
-      unquote(if first_use?, do: quote(do: @before_compile(VerifiedTranslations)))
+      quote do
+        import VerifiedTranslations, only: [sigil_t: 2]
+        @before_compile VerifiedTranslations
+      end
     end
   end
 
   @doc ~S"""
-  Translates the string using the configured Gettext backend, verifying at
-  compile time that the translation exists in all locales.
+  Translates the text to the current locale, verified at compile time.
 
-  Interpolated variables become Gettext bindings named after the variable,
-  assign or the last field of the accessed path.
+  Interpolated variables become bindings named after the variable, assign or
+  the last field of the accessed path: `#{@user.name}` is `%{name}`.
   """
   defmacro sigil_t({:<<>>, _meta, parts}, modifiers) do
-    env = __CALLER__
-
-    if modifiers != [] do
-      raise CompileError,
-        file: env.file,
-        line: env.line,
-        description: "~t does not support modifiers, got: #{modifiers}"
-    end
-
-    config =
-      Module.get_attribute(env.module, :__verified_translations__) ||
-        raise CompileError,
-          file: env.file,
-          line: env.line,
-          description: "~t requires `use VerifiedTranslations, backend: MyAppWeb.Gettext`"
-
-    {msgid, bindings} = Verifier.parse_parts(parts, env)
-
-    unless Gettext.Extractor.extracting?() do
-      Module.put_attribute(
-        env.module,
-        :__verified_translations_checks__,
-        {config, msgid, Keyword.keys(bindings)}
-      )
-
-      case Verifier.verify(config, msgid, Keyword.keys(bindings)) do
-        :ok ->
-          :ok
-
-        {:error, message} ->
-          Module.put_attribute(
-            env.module,
-            :__verified_translations_errors__,
-            {env.file, env.line, message}
-          )
-      end
-    end
-
-    quote do
-      Gettext.Macros.dgettext_with_backend(
-        unquote(config.backend),
-        unquote(config.domain),
-        unquote(msgid),
-        %{unquote_splicing(bindings)}
-      )
-    end
+    Compiler.sigil(parts, modifiers, __CALLER__)
   end
 
   @doc false
-  defmacro __before_compile__(env) do
-    errors =
-      env.module |> Module.get_attribute(:__verified_translations_errors__) |> Enum.reverse()
+  defmacro __before_compile__(env), do: Compiler.before_compile(env)
 
-    if errors != [] do
-      [{file, line, _} | _] = errors
+  @doc "Sets the locale of the current process."
+  @spec put_locale(String.t()) :: :ok
+  def put_locale(locale) when is_binary(locale) do
+    Process.put(@locale_key, locale)
+    :ok
+  end
 
-      details =
-        Enum.map_join(errors, "\n\n", fn {file, line, message} ->
-          "#{Path.relative_to_cwd(file)}:#{line}: #{message}"
-        end)
+  @doc "Returns the locale of the current process, or `nil` when unset."
+  @spec get_locale() :: String.t() | nil
+  def get_locale, do: Process.get(@locale_key)
 
-      raise CompileError,
-        file: file,
-        line: line,
-        description: """
-        #{length(errors)} unverified translation(s) in #{inspect(env.module)}:
+  @doc "Runs `fun` with `locale` as the current locale."
+  @spec with_locale(String.t(), (-> result)) :: result when result: term()
+  def with_locale(locale, fun) do
+    previous = get_locale()
+    put_locale(locale)
 
-        #{details}
-
-        Run `mix gettext.extract --merge` and translate the messages in priv/gettext.
-        """
-    end
-
-    checks = env.module |> Module.get_attribute(:__verified_translations_checks__) |> Enum.uniq()
-
-    # Instead of a compile-time dependency on the backend (which would recompile
-    # every caller on any PO change), Mix asks each module whether it is stale:
-    # it is only recompiled when one of its own messages stops verifying.
-    if checks != [] and not Module.defines?(env.module, {:__mix_recompile__?, 0}) do
-      quote do
-        @doc false
-        def __mix_recompile__? do
-          VerifiedTranslations.Verifier.stale?(unquote(Macro.escape(checks)))
-        end
-      end
+    try do
+      fun.()
+    after
+      if previous, do: put_locale(previous), else: Process.delete(@locale_key)
     end
   end
+
+  @doc "Configured locales, including the source locale."
+  @spec locales() :: [String.t()]
+  def locales, do: Compiler.config([]).locales
 end

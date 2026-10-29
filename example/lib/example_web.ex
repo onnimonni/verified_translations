@@ -40,7 +40,8 @@ defmodule ExampleWeb do
     quote do
       use Phoenix.Controller, formats: [:html, :json]
 
-      use VerifiedTranslations, backend: ExampleWeb.Gettext
+      use Gettext, backend: ExampleWeb.Gettext
+      use VerifiedTranslations
 
       import Plug.Conn
 
@@ -80,7 +81,8 @@ defmodule ExampleWeb do
   defp html_helpers do
     quote do
       # Translation
-      use VerifiedTranslations, backend: ExampleWeb.Gettext
+      use Gettext, backend: ExampleWeb.Gettext
+      use VerifiedTranslations
 
       # HTML escaping functionality
       import Phoenix.HTML

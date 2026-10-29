@@ -33,6 +33,7 @@ if config_env() == :dev do
         ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$",
         # Gettext translations
         ~r"priv/gettext/.*\.po$",
+        ~r"priv/translations/.*\.json$",
         # Router, Controllers, LiveViews and LiveComponents
         ~r"lib/example_web/router\.ex$",
         ~r"lib/example_web/(controllers|live|components)/.*\.(ex|heex)$"

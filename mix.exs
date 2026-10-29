@@ -8,13 +8,12 @@ defmodule VerifiedTranslations.MixProject do
     [
       app: :verified_translations,
       version: @version,
-      elixir: "~> 1.15",
+      elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
-      elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
       description:
-        "Compile-time verified Gettext translations for Phoenix via the ~t sigil. " <>
-          "Fails compilation when a translation is missing for any locale.",
+        "Compile-time verified translations for Phoenix: ~t sigil, one JSON file per message, " <>
+          "inlined at compile time, compilation fails when any locale is missing.",
       package: package(),
       docs: docs(),
       source_url: @source_url
@@ -22,16 +21,12 @@ defmodule VerifiedTranslations.MixProject do
   end
 
   def application do
-    [extra_applications: [:logger]]
+    [extra_applications: [:logger, :crypto]]
   end
-
-  defp elixirc_paths(:test), do: ["lib", "test/support"]
-  defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
     [
-      {:gettext, "~> 0.26 or ~> 1.0"},
-      {:expo, "~> 0.5 or ~> 1.0"},
+      {:expo, "~> 0.5 or ~> 1.0", optional: true},
       {:igniter, "~> 0.6", optional: true},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]

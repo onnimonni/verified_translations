@@ -1,6 +1,0 @@
-msgid ""
-msgstr ""
-"Language: en\n"
-
-msgid "Hello %{name}"
-msgstr ""

@@ -4,7 +4,7 @@ import Config
 # you can enable the server option below.
 config :example, ExampleWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
-  secret_key_base: "kj3OgSJg4xLoJunJOfwDjZ0z+rM5zOcnyPvnufxglKYBVoVHkIT2pT7ZmWmi6WO9",
+  secret_key_base: "rsa/M7VD03LZ2JdixxOmeHxwC4eApZK61Xq8OLA03Qz7+ZQVJbnLSz6m7M7lf4hI",
   server: false
 
 # Print only warnings and errors during test
