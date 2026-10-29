@@ -60,12 +60,10 @@ defmodule VerifiedTranslations.Verifier do
   Verifies `msgid` against the PO files of every required locale.
   """
   def verify(config, msgid, bindings) do
-    backend = Code.ensure_compiled!(config.backend)
-    domain = resolve_domain(config.domain, backend)
-    source_locale = config.source_locale || default_locale(backend)
-    locales = config.locales || backend.__gettext__(:known_locales)
-    catalog = Catalog.fetch(backend)
-    priv = backend.__gettext__(:priv)
+    %{priv: priv, domain: domain} = config
+    catalog = Catalog.fetch(priv)
+    source_locale = config.source_locale || Application.get_env(:gettext, :default_locale, "en")
+    locales = config.locales || catalog |> Map.keys() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
 
     problems =
       locales
@@ -86,6 +84,16 @@ defmodule VerifiedTranslations.Verifier do
          "translation for #{inspect(msgid)} (domain #{inspect(domain)}) is not verified:\n" <>
            Enum.join(problems, "\n")}
     end
+  end
+
+  @doc """
+  Called from `__mix_recompile__?/0` of modules using `~t`: true when any of
+  the module's messages no longer verifies, so Mix recompiles it and reports.
+  """
+  def stale?(checks) do
+    Enum.any?(checks, fn {config, msgid, bindings} -> verify(config, msgid, bindings) != :ok end)
+  rescue
+    _ -> true
   end
 
   defp check(catalog, locale, domain, msgid, bindings, source_locale, config) do
@@ -126,13 +134,4 @@ defmodule VerifiedTranslations.Verifier do
 
   defp po_path(priv, locale, domain),
     do: Path.join([priv, locale, "LC_MESSAGES", "#{domain}.po"])
-
-  defp resolve_domain(:default, backend), do: backend.__gettext__(:default_domain)
-  defp resolve_domain(domain, _backend), do: domain
-
-  defp default_locale(backend) do
-    backend.__gettext__(:default_locale)
-  rescue
-    _ -> Application.get_env(:gettext, :default_locale, "en")
-  end
 end

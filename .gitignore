@@ -35,3 +35,4 @@ verified_translations-*.tar
 # example app
 /example/_build/
 /example/deps/
+/bench/app/

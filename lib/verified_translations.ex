@@ -19,12 +19,14 @@ defmodule VerifiedTranslations do
   ## Options
 
     * `:backend` (required) - the Gettext backend module.
-    * `:domain` - Gettext domain for `~t`. Defaults to the backend's default domain.
-    * `:locales` - locales that must be translated. Defaults to all locales
-      found in the backend's priv directory (`known_locales`).
+    * `:priv` - directory of the PO files. Must match the backend's `:priv`.
+      Defaults to `"priv/gettext"`.
+    * `:domain` - Gettext domain for `~t`. Defaults to `"default"`.
+    * `:locales` - locales that must be translated. Defaults to all locale
+      directories in `:priv`.
     * `:source_locale` - locale whose msgstr may be empty because the msgid
-      itself is the text. Defaults to the backend's default locale
-      (usually `"en"`). Its PO entries are optional.
+      itself is the text. Defaults to the `:gettext` `:default_locale`
+      config (usually `"en"`). Its PO entries are optional.
     * `:allow_fuzzy` - treat `#, fuzzy` entries as translated. Defaults to `false`.
 
   Verification is skipped while running `mix gettext.extract`, so you can
@@ -37,13 +39,17 @@ defmodule VerifiedTranslations do
 
   @doc false
   defmacro __using__(opts) do
-    backend = Macro.expand(Keyword.fetch!(opts, :backend), __CALLER__)
+    # expand without adding a compile-time dependency on the backend
+    backend =
+      Macro.expand(Keyword.fetch!(opts, :backend), %{__CALLER__ | function: {:__info__, 1}})
+
     module = __CALLER__.module
     first_use? = not Module.has_attribute?(module, :__verified_translations__)
 
     Module.put_attribute(module, :__verified_translations__, %{
       backend: backend,
-      domain: Keyword.get(opts, :domain, :default),
+      priv: Keyword.get(opts, :priv, "priv/gettext"),
+      domain: Keyword.get(opts, :domain, "default"),
       locales: Keyword.get(opts, :locales),
       source_locale: Keyword.get(opts, :source_locale),
       allow_fuzzy: Keyword.get(opts, :allow_fuzzy, false)
@@ -51,12 +57,11 @@ defmodule VerifiedTranslations do
 
     if first_use? do
       Module.register_attribute(module, :__verified_translations_errors__, accumulate: true)
+      Module.register_attribute(module, :__verified_translations_checks__, accumulate: true)
     end
 
     quote do
       use Gettext, backend: unquote(backend)
-      # compile-time dependency: PO changes recompile the backend and thus callers
-      require unquote(backend)
       import VerifiedTranslations, only: [sigil_t: 2]
       unquote(if first_use?, do: quote(do: @before_compile(VerifiedTranslations)))
     end
@@ -89,6 +94,12 @@ defmodule VerifiedTranslations do
     {msgid, bindings} = Verifier.parse_parts(parts, env)
 
     unless Gettext.Extractor.extracting?() do
+      Module.put_attribute(
+        env.module,
+        :__verified_translations_checks__,
+        {config, msgid, Keyword.keys(bindings)}
+      )
+
       case Verifier.verify(config, msgid, Keyword.keys(bindings)) do
         :ok ->
           :ok
@@ -137,6 +148,18 @@ defmodule VerifiedTranslations do
         """
     end
 
-    nil
+    checks = env.module |> Module.get_attribute(:__verified_translations_checks__) |> Enum.uniq()
+
+    # Instead of a compile-time dependency on the backend (which would recompile
+    # every caller on any PO change), Mix asks each module whether it is stale:
+    # it is only recompiled when one of its own messages stops verifying.
+    if checks != [] and not Module.defines?(env.module, {:__mix_recompile__?, 0}) do
+      quote do
+        @doc false
+        def __mix_recompile__? do
+          VerifiedTranslations.Verifier.stale?(unquote(Macro.escape(checks)))
+        end
+      end
+    end
   end
 end

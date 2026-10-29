@@ -6,7 +6,7 @@ defmodule VerifiedTranslationsTest do
 
     Code.compile_string("""
     defmodule #{inspect(module)} do
-      use VerifiedTranslations, backend: VerifiedTranslations.TestGettext#{opts}
+      use VerifiedTranslations, backend: VerifiedTranslations.TestGettext, priv: "test/fixtures/gettext"#{opts}
       def run(name), do: (_ = name; #{body})
     end
     """)

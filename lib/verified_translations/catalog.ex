@@ -1,29 +1,54 @@
 defmodule VerifiedTranslations.Catalog do
   @moduledoc false
 
-  # Parsed PO files of a Gettext backend, cached per compiler VM and
-  # invalidated when any PO file changes.
+  # Parsed PO files of a Gettext priv directory, cached in :persistent_term for the
+  # lifetime of the compiler VM and invalidated when any PO file changes.
 
   alias Expo.Message
 
   @type entry :: %{msgstr: String.t(), fuzzy?: boolean()}
   @type t :: %{{locale :: String.t(), domain :: String.t()} => %{String.t() => entry}}
 
-  @spec fetch(module()) :: t()
-  def fetch(backend) do
-    files = backend.__gettext__(:priv) |> Path.join("*/LC_MESSAGES/*.po") |> Path.wildcard()
-    fingerprint = Enum.map(files, &{&1, File.stat!(&1).mtime, File.stat!(&1).size})
-    key = {__MODULE__, backend}
+  @spec fetch(Path.t()) :: t()
+  def fetch(priv) do
+    key = {__MODULE__, priv}
+    fingerprint = fingerprint(priv)
 
     case :persistent_term.get(key, nil) do
       {^fingerprint, catalog} ->
         catalog
 
       _ ->
-        catalog = Map.new(files, &parse/1)
-        :persistent_term.put(key, {fingerprint, catalog})
-        catalog
+        # many modules expand ~t in parallel: parse each PO file set only once
+        :global.trans({key, self()}, fn ->
+          case :persistent_term.get(key, nil) do
+            {^fingerprint, catalog} ->
+              catalog
+
+            _ ->
+              catalog = parse_all(priv)
+              :persistent_term.put(key, {fingerprint, catalog})
+              catalog
+          end
+        end)
     end
+  end
+
+  defp po_files(priv), do: priv |> Path.join("*/LC_MESSAGES/*.po") |> Path.wildcard()
+
+  @doc "Cheap change detection for the PO files in `priv` (path, mtime, size, inode)."
+  def fingerprint(priv) do
+    for path <- po_files(priv) do
+      %File.Stat{mtime: mtime, size: size, inode: inode} = File.stat!(path, time: :posix)
+      {path, mtime, size, inode}
+    end
+  end
+
+  defp parse_all(priv) do
+    priv
+    |> po_files()
+    |> Task.async_stream(&parse/1, timeout: :infinity)
+    |> Map.new(fn {:ok, entry} -> entry end)
   end
 
   defp parse(path) do
