@@ -1,0 +1,16 @@
+msgid ""
+msgstr ""
+"Language: fi\n"
+
+msgid "Hello %{name}"
+msgstr "Hei %{name}"
+
+msgid "Only in Finnish"
+msgstr "Vain suomeksi"
+
+msgid "Bad binding"
+msgstr "Huono %{nimi}"
+
+#, fuzzy
+msgid "Fuzzy"
+msgstr "Sumea"

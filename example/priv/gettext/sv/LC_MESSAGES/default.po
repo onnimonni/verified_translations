@@ -1,0 +1,48 @@
+## "msgid"s in this file come from POT (.pot) files.
+###
+### Do not add, change, or remove "msgid"s manually here as
+### they're tied to the ones in the corresponding POT file
+### (with the same domain).
+###
+### Use "mix gettext.extract --merge" or "mix gettext.merge"
+### to merge POT files into PO files.
+msgid ""
+msgstr ""
+"Language: sv\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#: lib/example_web/components/core_components.ex:375
+#, elixir-autogen, elixir-format
+msgid "Actions"
+msgstr "Åtgärder"
+
+#: lib/example_web/components/layouts.ex:102
+#: lib/example_web/components/layouts.ex:117
+#, elixir-autogen, elixir-format
+msgid "Attempting to reconnect"
+msgstr "Försöker återansluta"
+
+#: lib/example_web/components/layouts.ex:109
+#, elixir-autogen, elixir-format
+msgid "Something went wrong!"
+msgstr "Något gick fel!"
+
+#: lib/example_web/components/layouts.ex:94
+#, elixir-autogen, elixir-format
+msgid "We can't find the internet"
+msgstr "Vi hittar inte internet"
+
+#: lib/example_web/components/core_components.ex:81
+#, elixir-autogen, elixir-format
+msgid "close"
+msgstr "stäng"
+
+#: lib/example_web/controllers/page_html/home.html.heex:60
+#, elixir-autogen, elixir-format
+msgid "Peace of mind from prototype to production."
+msgstr "Sinnesro från prototyp till produktion."
+
+#: lib/example_web/controllers/page_html/home.html.heex:63
+#, elixir-autogen, elixir-format
+msgid "Welcome, %{name}!"
+msgstr "Välkommen, %{name}!"
