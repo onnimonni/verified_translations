@@ -8,20 +8,57 @@ defmodule VerifiedTranslations.Message do
   the same file.
   """
 
-  @doc "Path of the JSON file for `msgid`."
-  @spec path(Path.t(), String.t(), String.t()) :: Path.t()
-  def path(root, domain, msgid), do: Path.join([root, domain, file_name(msgid)])
+  @doc """
+  Path of the JSON file for `msgid`.
+
+  ## Options
+
+    * `:context` - Gettext-style message context (`msgctxt`)
+    * `:plural` - `true` for `~t"..."N`, or the source forms map of `tn/2`
+  """
+  @spec path(Path.t(), String.t(), String.t(), keyword()) :: Path.t()
+  def path(root, domain, msgid, opts \\ []) do
+    Path.join([root, domain, file_name(identity(msgid, opts), msgid)])
+  end
+
+  @doc "Plural source forms in CLDR order, as `path/4` expects for `tn/2` messages."
+  @spec sorted_forms(%{String.t() => String.t()}) :: [{String.t(), String.t()}]
+  def sorted_forms(forms) do
+    order = ~w(zero one two few many other)
+    Enum.sort_by(forms, fn {category, _} -> Enum.find_index(order, &(&1 == category)) || 99 end)
+  end
+
+  # what the hash covers: messages differing in context or plural forms get
+  # their own files, plain messages keep hashing just the msgid
+  defp identity(msgid, opts) do
+    base =
+      case opts[:context] do
+        nil -> msgid
+        context -> context <> <<4>> <> msgid
+      end
+
+    case opts[:plural] do
+      nil -> base
+      false -> base
+      true -> base <> <<0>> <> "N"
+      forms -> base <> <<0>> <> Enum.map_join(forms, <<0>>, fn {k, v} -> "#{k}=#{v}" end)
+    end
+  end
 
   # 128-bit digest: collisions are not a practical concern
   @hash_chars 32
   # keeps file names far below the common 255 byte limit
   @slug_bytes 64
 
-  @doc "File name for `msgid`: readable slug plus a content hash."
-  @spec file_name(String.t()) :: String.t()
-  def file_name(msgid) do
+  @doc "File name for `msgid`: readable slug plus a content hash of `identity`."
+  @spec file_name(String.t(), String.t()) :: String.t()
+  def file_name(identity, msgid \\ nil) do
+    msgid = msgid || identity
+
     hash =
-      :crypto.hash(:sha256, msgid) |> Base.encode16(case: :lower) |> binary_part(0, @hash_chars)
+      :crypto.hash(:sha256, identity)
+      |> Base.encode16(case: :lower)
+      |> binary_part(0, @hash_chars)
 
     slug =
       msgid
@@ -76,13 +113,40 @@ defmodule VerifiedTranslations.Message do
   Encodes a message deterministically: `msgid` first, then locales sorted.
   """
   @spec encode(String.t(), %{String.t() => String.t()}) :: String.t()
-  def encode(msgid, translations) do
+  def encode(msgid, translations, opts \\ []) do
+    header =
+      [
+        opts[:plural] && {"kind", "plural"},
+        opts[:context] && {"msgctxt", opts[:context]},
+        {"msgid", msgid}
+      ]
+      |> Enum.reject(&(&1 in [nil, false]))
+
     lines =
-      [{"msgid", msgid} | Enum.sort(translations)]
-      |> Enum.map(fn {key, value} -> "  #{JSON.encode!(key)}: #{JSON.encode!(value)}" end)
+      Enum.map(header ++ Enum.sort(translations), fn {key, value} ->
+        "  #{JSON.encode!(key)}: #{encode_value(value)}"
+      end)
 
     "{\n" <> Enum.join(lines, ",\n") <> "\n}\n"
   end
+
+  @categories ~w(zero one two few many other)
+
+  # plural forms in CLDR order, one per line
+  defp encode_value(forms) when is_map(forms) do
+    lines =
+      forms
+      |> Enum.sort_by(fn {category, _} ->
+        Enum.find_index(@categories, &(&1 == category)) || 99
+      end)
+      |> Enum.map(fn {category, text} ->
+        "    #{JSON.encode!(category)}: #{JSON.encode!(text)}"
+      end)
+
+    "{\n" <> Enum.join(lines, ",\n") <> "\n  }"
+  end
+
+  defp encode_value(value), do: JSON.encode!(value)
 
   @doc "Placeholder names (`%{name}`) used in `text`."
   @spec bindings(String.t()) :: [String.t()]
@@ -101,15 +165,18 @@ defmodule VerifiedTranslations.Message do
   def update!(path, msgid, translations) do
     existing =
       case read(path) do
-        {:ok, %{"msgid" => ^msgid} = data, _} -> Map.delete(data, "msgid")
+        {:ok, %{"msgid" => ^msgid} = data, _} -> data
         {:ok, _, _} -> raise ArgumentError, "#{path}: msgid does not match #{inspect(msgid)}"
         {:error, :enoent} -> %{}
         {:error, reason} -> raise ArgumentError, "#{path}: #{reason}"
       end
 
+    opts = [plural: existing["kind"] == "plural", context: existing["msgctxt"]]
+    merged = existing |> Map.drop(["msgid", "msgctxt", "kind"]) |> Map.merge(translations)
+
     File.mkdir_p!(Path.dirname(path))
     tmp = tmp_path(path)
-    File.write!(tmp, encode(msgid, Map.merge(existing, translations)))
+    File.write!(tmp, encode(msgid, merged, opts))
     File.rename!(tmp, path)
   end
 

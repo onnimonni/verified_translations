@@ -20,9 +20,23 @@ defmodule Mix.Tasks.VerifiedTranslations.Migrate.Docs do
         ~t"Hello \#{@user.name}"
         # msgid "Hello %{user_name}", placeholders in translations renamed to match
 
-    Calls that cannot be expressed with `~t` are left alone and listed:
-    plurals (`ngettext`), contexts (`pgettext`), other domains and bindings
-    that are not a variable, assign or field access.
+    `ngettext/3,4` becomes `tn/2` with its PO plural forms mapped to CLDR
+    categories:
+
+        ngettext("1 file", "%{count} files", length(files))
+        # becomes
+        tn(length(files), one: "1 file", other: "%{count} files")
+
+    Bindings that are not a variable, assign or field keep their Gettext name:
+    `gettext("Hi %{name}", name: String.upcase(u))` becomes
+    `~t"Hi \#{name = String.upcase(u)}"`.
+
+    Projects using `gettext_sigils` get `use GettextSigils` replaced and the
+    dependency removed. Their `~t` sigils produce the same msgids, so
+    `mix verified_translations.extract` imports the existing translations.
+
+    Calls that cannot be expressed are left alone and listed: contexts
+    (`pgettext`) and other domains.
 
     Only modules that can use `~t` are rewritten (`use VerifiedTranslations`
     or `use MyAppWeb, ...`). Run with `--dry-run` to review the diff.
@@ -51,7 +65,7 @@ if Code.ensure_loaded?(Igniter) do
     use Igniter.Mix.Task
 
     alias Sourceror.Zipper
-    alias VerifiedTranslations.Message
+    alias VerifiedTranslations.{Message, PO}
 
     @compile {:no_warn_undefined, [Expo.PO, Expo.Message, Expo.Messages]}
 
@@ -78,6 +92,7 @@ if Code.ensure_loaded?(Igniter) do
         |> Igniter.include_glob("lib/**/*.{ex,heex}")
         |> Igniter.include_glob(Path.join(opts[:gettext], "**/*.{po,pot}"))
 
+      {igniter, sigils?} = replace_gettext_sigils(igniter)
       {igniter, conversions, skipped} = rewrite_sources(igniter, web)
       locales = locales(igniter, opts)
 
@@ -85,6 +100,61 @@ if Code.ensure_loaded?(Igniter) do
       |> write_translations(conversions, locales, opts)
       |> prune_po_files(conversions, opts)
       |> report(conversions, skipped)
+      |> import_existing_sigils(sigils?)
+    end
+
+    ## gettext_sigils
+
+    # `use GettextSigils, backend: B, sigils: [...]` takes the same options
+    @use_gettext_sigils ~r/\buse GettextSigils\b/
+
+    defp replace_gettext_sigils(igniter) do
+      matcher = GlobEx.compile!(Path.expand("{lib,test}/**/*.{ex,exs}"))
+
+      igniter =
+        Igniter.include_glob(igniter, "{lib,test}/**/*.{ex,exs}")
+
+      sources =
+        igniter.rewrite
+        |> Rewrite.sources()
+        |> Enum.filter(&GlobEx.match?(matcher, Path.expand(&1.path)))
+        |> Enum.filter(&(Rewrite.Source.get(&1, :content) =~ @use_gettext_sigils))
+
+      igniter =
+        Enum.reduce(sources, igniter, fn source, igniter ->
+          Igniter.update_file(igniter, source.path, fn source ->
+            content = Rewrite.Source.get(source, :content)
+
+            Rewrite.Source.update(
+              source,
+              :content,
+              Regex.replace(@use_gettext_sigils, content, "use VerifiedTranslations")
+            )
+          end)
+        end)
+
+      sigils? = sources != [] or Igniter.Project.Deps.has_dep?(igniter, :gettext_sigils)
+
+      igniter =
+        if Igniter.Project.Deps.has_dep?(igniter, :gettext_sigils),
+          do: Igniter.Project.Deps.remove_dep(igniter, :gettext_sigils),
+          else: igniter
+
+      {igniter, sigils?}
+    end
+
+    # existing ~t sigils keep their msgids (same interpolation rules), so
+    # their PO translations import as they are once the project compiles
+    defp import_existing_sigils(igniter, false), do: igniter
+
+    defp import_existing_sigils(igniter, true) do
+      igniter
+      |> Igniter.add_task("verified_translations.extract")
+      |> Igniter.add_notice("""
+      Replaced gettext_sigils with verified_translations. Existing ~t sigils keep
+      their msgids; `mix verified_translations.extract` (scheduled now) imports
+      their translations from the PO files into priv/translations.
+      """)
     end
 
     ## Rewriting code and templates
@@ -310,25 +380,22 @@ if Code.ensure_loaded?(Igniter) do
       args = Enum.map(args, &unwrap/1)
 
       case {name, args} do
-        {:gettext, [msgid]} ->
-          to_sigil(msgid, [])
+        {:gettext, [msgid | rest]} ->
+          to_sigil(msgid, bindings(rest))
 
-        {:gettext, [msgid, bindings]} ->
-          to_sigil(msgid, bindings)
+        {:dgettext, ["default", msgid | rest]} ->
+          to_sigil(msgid, bindings(rest))
 
-        {:dgettext, ["default", msgid]} ->
-          to_sigil(msgid, [])
+        {:ngettext, [one, other, count | rest]} ->
+          to_plural(one, other, count, bindings(rest))
 
-        {:dgettext, ["default", msgid, bindings]} ->
-          to_sigil(msgid, bindings)
+        {:dngettext, ["default", one, other, count | rest]} ->
+          to_plural(one, other, count, bindings(rest))
 
-        {:dgettext, [domain | _]} when is_binary(domain) ->
+        {fun, [domain | _]} when fun in [:dgettext, :dngettext] and is_binary(domain) ->
           {:skip, "domain #{inspect(domain)}"}
 
-        {plural, _} when plural in [:ngettext, :dngettext, :pngettext] ->
-          {:skip, "plural (#{plural})"}
-
-        {context, _} when context in [:pgettext, :dpgettext] ->
+        {context, _} when context in [:pgettext, :dpgettext, :pngettext] ->
           {:skip, "context (#{context})"}
 
         _ ->
@@ -336,12 +403,47 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
+    defp bindings([]), do: []
+    defp bindings([bindings]) when is_list(bindings), do: bindings
+    defp bindings(_), do: :dynamic
+
     defp unwrap({:__block__, _, [literal]}) when is_binary(literal) or is_list(literal),
       do: literal
 
     defp unwrap(other), do: other
 
     defp to_sigil(msgid, bindings) when is_binary(msgid) and is_list(bindings) do
+      with {:ok, text, renames} <- interpolate(msgid, bindings, []) do
+        {:ok, ~s|~t"#{text}"|,
+         %{kind: :singular, msgid: msgid, new_msgid: rename(msgid, renames), renames: renames}}
+      end
+    end
+
+    defp to_sigil(_msgid, _bindings), do: {:skip, "dynamic arguments"}
+
+    # ngettext(one, other, n) -> tn(n, one: ..., other: ...); %{count} stays literal
+    defp to_plural(one, other, count, bindings)
+         when is_binary(one) and is_binary(other) and is_list(bindings) do
+      with {:ok, one_text, renames} <- interpolate(one, bindings, ["count"]),
+           {:ok, other_text, other_renames} <- interpolate(other, bindings, ["count"]) do
+        renames = Map.merge(renames, other_renames)
+        forms = %{"one" => rename(one, renames), "other" => rename(other, renames)}
+
+        code =
+          ~s|tn(#{Sourceror.to_string(count)}, one: "#{one_text}", other: "#{other_text}")|
+
+        {:ok, code,
+         %{kind: :plural, msgid: one, new_msgid: forms["other"], forms: forms, renames: renames}}
+      end
+    end
+
+    defp to_plural(_one, _other, _count, _bindings), do: {:skip, "dynamic arguments"}
+
+    # Turns a gettext msgid into ~t text. Variables, assigns and fields get the
+    # name ~t derives (%{name} with name: @user.name -> #{@user.name}, renamed
+    # to %{user_name}); other expressions keep their key explicitly
+    # (#{name = String.upcase(x)}) so the msgid stays the same.
+    defp interpolate(msgid, bindings, literal) do
       bindings =
         Map.new(bindings, fn {key, expr} -> {key |> unwrap_key() |> Atom.to_string(), expr} end)
 
@@ -350,66 +452,81 @@ if Code.ensure_loaded?(Igniter) do
         |> Regex.scan(msgid, capture: :all_but_first)
         |> List.flatten()
         |> Enum.uniq()
+        |> Kernel.--(literal)
 
-      with {:ok, renames} <- binding_names(keys, bindings) do
-        parts = Regex.split(@placeholder, msgid, include_captures: true, trim: true)
-
-        sigil =
-          Enum.map_join(parts, fn part ->
+      with {:ok, names} <- binding_names(keys, bindings) do
+        text =
+          @placeholder
+          |> Regex.split(msgid, include_captures: true, trim: true)
+          |> Enum.map_join(fn part ->
             case Regex.run(~r/^%\{(\w+)\}$/, part, capture: :all_but_first) do
-              [key] -> "\#{#{bindings |> Map.fetch!(key) |> Sourceror.to_string()}}"
-              nil -> escape(part)
+              [key] ->
+                if key in literal,
+                  do: part,
+                  else: interpolation(key, Map.fetch!(names, key), bindings[key])
+
+              nil ->
+                escape(part)
             end
           end)
 
-        new_msgid = rename(msgid, renames)
-        {:ok, ~s|~t"#{sigil}"|, %{msgid: msgid, new_msgid: new_msgid, renames: renames}}
+        renames = for {key, {:derived, name}} <- names, name != key, into: %{}, do: {key, name}
+        {:ok, text, renames}
       end
     end
 
-    defp to_sigil(_msgid, _bindings), do: {:skip, "dynamic arguments"}
+    defp interpolation(_key, {:derived, _name}, expr), do: "\#{#{Sourceror.to_string(expr)}}"
+    defp interpolation(key, :explicit, expr), do: "\#{#{key} = #{Sourceror.to_string(expr)}}"
 
     defp unwrap_key({:__block__, _, [key]}) when is_atom(key), do: key
     defp unwrap_key(key) when is_atom(key), do: key
 
-    # %{key} -> name ~t derives from the bound expression
+    # key => {:derived, name} | :explicit
     defp binding_names(keys, bindings) do
-      Enum.reduce_while(keys, {:ok, %{}}, fn key, {:ok, renames} ->
-        with {:ok, expr} <- Map.fetch(bindings, key),
-             {:ok, path} <- binding_path(expr) do
-          name = Enum.join(path, "_")
+      Enum.reduce_while(keys, {:ok, %{}}, fn key, {:ok, names} ->
+        case Map.fetch(bindings, key) do
+          {:ok, expr} ->
+            name = derived_name(expr)
 
-          clash? =
-            Enum.any?(renames, fn {other, other_name} ->
-              other_name == name and
-                Sourceror.to_string(bindings[other]) != Sourceror.to_string(expr)
-            end)
+            taken? =
+              Enum.any?(names, fn {other, kind} -> kind == {:derived, name} and other != key end)
 
-          if clash?,
-            do: {:halt, {:skip, "bindings would share the name %{#{name}}"}},
-            else: {:cont, {:ok, Map.put(renames, key, name)}}
-        else
-          :error -> {:halt, {:skip, "binding %{#{key}} is not given"}}
-          :complex -> {:halt, {:skip, "binding %{#{key}} is not a variable, assign or field"}}
+            kind =
+              if name && not taken?,
+                do: {:derived, name},
+                else: :explicit
+
+            {:cont, {:ok, Map.put(names, key, kind)}}
+
+          :error ->
+            {:halt, {:skip, "binding %{#{key}} is not given"}}
         end
       end)
     end
 
-    defp binding_path({name, _, ctx}) when is_atom(name) and is_atom(ctx), do: {:ok, [name]}
+    # the name ~t derives, for variables, assigns and field access only
+    defp derived_name(expr) do
+      ast = expr |> Sourceror.to_string() |> Code.string_to_quoted!()
 
-    defp binding_path({:@, _, [{name, _, ctx}]}) when is_atom(name) and is_atom(ctx),
-      do: {:ok, [name]}
-
-    defp binding_path({{:., _, [left, field]}, meta, []}) when is_atom(field) do
-      with true <- Keyword.get(meta, :no_parens, false),
-           {:ok, path} <- binding_path(left) do
-        {:ok, path ++ [field]}
-      else
-        _ -> :complex
+      if simple?(ast) do
+        # "%{user_name}" -> "user_name"
+        ast |> sigil_msgid() |> String.slice(2..-2//1)
       end
     end
 
-    defp binding_path(_), do: :complex
+    defp simple?({name, _, ctx}) when is_atom(name) and is_atom(ctx), do: true
+    defp simple?({:@, _, [{name, _, ctx}]}) when is_atom(name) and is_atom(ctx), do: true
+
+    defp simple?({{:., _, [left, field]}, meta, []}) when is_atom(field),
+      do: meta[:no_parens] == true and simple?(left)
+
+    defp simple?(_), do: false
+
+    defp sigil_msgid(ast) do
+      parts = [{:"::", [], [{{:., [], [Kernel, :to_string]}, [], [ast]}, {:binary, [], nil}]}]
+      {msgid, _} = VerifiedTranslations.Compiler.parse_parts(parts, __ENV__)
+      msgid
+    end
 
     defp rename(text, renames) do
       Regex.replace(@placeholder, text, fn whole, key ->
@@ -460,46 +577,53 @@ if Code.ensure_loaded?(Igniter) do
     defp write_translations(igniter, [], _locales, _opts), do: igniter
 
     defp write_translations(igniter, conversions, [source_locale | _] = locales, opts) do
+      # {locale, msgid} => PO entry, default domain without context
       catalog =
         for {path, messages} <- po_files(igniter, opts),
             [_, "LC_MESSAGES", locale | _] = path |> Path.split() |> Enum.reverse(),
             locale in locales and locale != source_locale,
-            %{__struct__: Expo.Message.Singular, msgctxt: nil, obsolete: false} = message <-
-              messages.messages,
-            not Expo.Message.has_flag?(message, "fuzzy"),
-            (msgstr = IO.iodata_to_binary(message.msgstr)) != "",
+            {{nil, msgid}, entry} <-
+              PO.parse(Expo.PO.compose(messages) |> IO.iodata_to_binary(), locale),
             into: %{},
-            do: {{locale, IO.iodata_to_binary(message.msgid)}, msgstr}
+            do: {{locale, msgid}, entry}
 
       conversions
-      |> Enum.uniq_by(& &1.new_msgid)
-      |> Enum.reduce(igniter, fn %{msgid: msgid, new_msgid: new_msgid, renames: renames},
-                                 igniter ->
+      |> Enum.uniq_by(&{&1.kind, &1.new_msgid, &1[:forms]})
+      |> Enum.reduce(igniter, fn conversion, igniter ->
+        %{kind: kind, msgid: msgid, new_msgid: new_msgid, renames: renames} = conversion
+        plural = if kind == :plural, do: Message.sorted_forms(conversion.forms)
+        encode_opts = [plural: kind == :plural]
+
         translations =
           for locale <- locales -- [source_locale], into: %{} do
-            {locale, catalog |> Map.get({locale, msgid}, "") |> rename(renames)}
+            imported = PO.convert(Map.get(catalog, {locale, msgid}), kind, locale)
+            {locale, rename_translation(imported, renames, kind, locale)}
           end
 
-        path = Message.path(opts[:path], "default", new_msgid)
+        path = Message.path(opts[:path], "default", new_msgid, plural: plural)
 
         Igniter.create_or_update_file(
           igniter,
           path,
-          Message.encode(new_msgid, translations),
+          Message.encode(new_msgid, translations, encode_opts),
           fn source ->
             content = Rewrite.Source.get(source, :content)
 
             case JSON.decode(content) do
               {:ok, %{"msgid" => ^new_msgid} = existing} ->
                 # keep translations already there, fill the empty ones
+                current = Map.drop(existing, ["msgid", "msgctxt", "kind"])
+
                 merged =
-                  Map.merge(translations, Map.delete(existing, "msgid"), fn _locale,
-                                                                            imported,
-                                                                            current ->
-                    if current == "", do: imported, else: current
+                  Map.merge(translations, current, fn _locale, imported, current ->
+                    if current in ["", nil] or current == %{}, do: imported, else: current
                   end)
 
-                Rewrite.Source.update(source, :content, Message.encode(new_msgid, merged))
+                Rewrite.Source.update(
+                  source,
+                  :content,
+                  Message.encode(new_msgid, merged, encode_opts)
+                )
 
               _ ->
                 source
@@ -508,6 +632,20 @@ if Code.ensure_loaded?(Igniter) do
         )
       end)
     end
+
+    defp rename_translation(nil, _renames, :singular, _locale), do: ""
+
+    defp rename_translation(nil, _renames, :plural, locale) do
+      case VerifiedTranslations.Plural.language(locale) do
+        nil -> %{}
+        lang -> Map.new(VerifiedTranslations.Plural.categories(lang), &{&1, ""})
+      end
+    end
+
+    defp rename_translation(forms, renames, :plural, _locale),
+      do: Map.new(forms, fn {category, text} -> {category, rename(text, renames)} end)
+
+    defp rename_translation(text, renames, :singular, _locale), do: rename(text, renames)
 
     # drop migrated messages from PO/POT files unless a gettext call still uses them
     defp prune_po_files(igniter, [], _opts), do: igniter
@@ -537,8 +675,7 @@ if Code.ensure_loaded?(Igniter) do
 
         kept =
           Enum.reject(po.messages, fn message ->
-            match?(%{__struct__: Expo.Message.Singular, msgctxt: nil}, message) and
-              IO.iodata_to_binary(message.msgid) in migrated
+            message.msgctxt == nil and IO.iodata_to_binary(message.msgid) in migrated
           end)
 
         if length(kept) == length(po.messages) do

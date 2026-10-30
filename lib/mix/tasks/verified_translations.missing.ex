@@ -6,18 +6,20 @@ defmodule Mix.Tasks.VerifiedTranslations.Missing do
       mix verified_translations.missing          # human readable, exit 1 if any
       mix verified_translations.missing --json   # for scripts and AI agents
 
-  The JSON output can be edited and fed back to
-  `mix verified_translations.put --from FILE`:
+  The JSON output can be filled in and fed back to
+  `mix verified_translations.put --from FILE`. Plural messages list the
+  locale's CLDR categories to fill:
 
-      [{"msgid": "Hello %{name}", "domain": "default", "missing": ["sv"], "fi": "Hei %{name}", "sv": ""}]
+      [{"msgid": "%{count} files", "kind": "plural", "path": "priv/...json",
+        "domain": "default", "missing": ["fi"], "fi": {"one": "", "other": ""}}]
 
-  Run `mix verified_translations.extract` first to create files for new `~t`
-  messages.
+  Run `mix verified_translations.extract` first to create files for new
+  `~t` messages.
   """
 
   use Mix.Task
 
-  alias VerifiedTranslations.{Compiler, Message}
+  alias VerifiedTranslations.{Compiler, Message, Plural}
 
   @impl Mix.Task
   def run(argv) do
@@ -27,14 +29,17 @@ defmodule Mix.Tasks.VerifiedTranslations.Missing do
     required = config.locales -- [config.source_locale]
 
     missing =
-      for path <- Path.wildcard(Path.join(config.path, "*/*.json")) |> Enum.sort(),
+      for path <- config.path |> Path.join("*/*.json") |> Path.wildcard() |> Enum.sort(),
           {:ok, data, _} <- [Message.read(path)],
-          locales = Enum.filter(required, &(Map.get(data, &1, "") == "")),
+          locales = Enum.filter(required, &untranslated?(Map.get(data, &1), plural?(data))),
           locales != [] do
+        filled = Map.new(locales, &{&1, fill(Map.get(data, &1), &1, plural?(data))})
+
         data
-        |> Map.merge(Map.new(required, &{&1, Map.get(data, &1, "")}))
+        |> Map.merge(filled)
         |> Map.merge(%{
           "domain" => path |> Path.dirname() |> Path.basename(),
+          "path" => path,
           "missing" => locales
         })
       end
@@ -51,4 +56,28 @@ defmodule Mix.Tasks.VerifiedTranslations.Missing do
       if missing != [], do: Mix.raise("#{length(missing)} message(s) lack translations")
     end
   end
+
+  defp plural?(data), do: data["kind"] == "plural"
+
+  defp untranslated?(nil, _plural?), do: true
+  defp untranslated?("", _plural?), do: true
+
+  defp untranslated?(forms, true) when is_map(forms),
+    do: forms == %{} or Enum.any?(forms, fn {_, text} -> text == "" end)
+
+  defp untranslated?(_value, _plural?), do: false
+
+  # plural locales list their CLDR categories, keeping forms already there
+  defp fill(current, locale, true) do
+    categories =
+      case Plural.language(locale) do
+        nil -> []
+        lang -> Plural.categories(lang)
+      end
+
+    current = if is_map(current), do: current, else: %{}
+    Map.new(categories, &{&1, Map.get(current, &1, "")})
+  end
+
+  defp fill(_current, _locale, false), do: ""
 end

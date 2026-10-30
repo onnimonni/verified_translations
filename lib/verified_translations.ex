@@ -62,9 +62,35 @@ defmodule VerifiedTranslations do
   Interpolated variables become bindings named after their access path:
   `#{name}` and `#{@name}` are `%{name}`, `#{@user.name}` is `%{user_name}`.
   """
+  defmacro sigil_t(text, modifiers)
+
+  defmacro sigil_t(text, modifiers) when is_binary(text) do
+    Compiler.sigil([text], modifiers, __CALLER__)
+  end
+
   defmacro sigil_t({:<<>>, _meta, parts}, modifiers) do
     Compiler.sigil(parts, modifiers, __CALLER__)
   end
+
+  @doc ~S"""
+  Translates a plural message, choosing the CLDR plural category of `count`
+  for the current locale.
+
+      tn(length(files), one: "%{count} file", other: "%{count} files")
+      tn(@n, one: "#{@user.name} has one item", other: "#{@user.name} has %{count} items")
+
+  The forms must be exactly the source locale's CLDR categories (`one` and
+  `other` for English). `%{count}` is the first argument; other values are
+  interpolated like in `~t`. The message file holds one object of forms per
+  locale, verified to have exactly that locale's categories:
+
+      {"kind": "plural", "msgid": "%{count} files",
+       "fi": {"one": "%{count} tiedosto", "other": "%{count} tiedostoa"}}
+
+  `~t"#{count} file(s)"N` (gettext_sigils compatible) is the same with one
+  source text for every category.
+  """
+  defmacro tn(count, forms), do: Compiler.plural(count, forms, __CALLER__)
 
   @doc false
   defmacro __before_compile__(env), do: Compiler.before_compile(env)
@@ -142,11 +168,27 @@ defmodule VerifiedTranslations do
   # Runtime of ~t (see Compiler.expand/5): picks the slot or template and fills
   # in binding values. Templates are binaries or lists of binaries and binding
   # indexes.
-  def render(slots, index, values) when is_tuple(slots), do: render(elem(slots, index), values)
-
-  @doc false
   def render(text, _values) when is_binary(text), do: text
   def render(parts, values), do: parts |> fill(values) |> IO.iodata_to_binary()
+
+  @doc false
+  # plural runtime: {cldr_language, %{category => template}}
+  def render_plural({lang, forms}, values, count_index) do
+    category = VerifiedTranslations.Plural.category(lang, elem(values, count_index))
+    render(Map.get(forms, category) || Map.fetch!(forms, "other"), values)
+  end
+
+  @doc false
+  # gettext_sigils compatible postprocess modifiers, applied in order
+  def postprocess!(modifiers, string) do
+    Enum.reduce(modifiers, string, fn {module, opts}, string ->
+      case module.postprocess(string, opts) do
+        {:ok, string} -> string
+        {:error, %{__exception__: true} = e} -> raise ArgumentError, Exception.message(e)
+        {:error, reason} -> raise ArgumentError, "#{inspect(module)}: #{reason}"
+      end
+    end)
+  end
 
   defp fill([], _values), do: []
 

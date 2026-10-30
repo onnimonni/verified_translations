@@ -45,12 +45,16 @@ never read a half-written file.
 
 ## What is verified
 
-For every `~t`, at compile time:
+For every `~t` and `tn`, at compile time:
 
-* the translation file exists. If it doesn't, compiling creates a stub you only need to fill in
+* the translation file exists. If it doesn't, compiling creates a stub you only need to fill in,
+  unless the translation still lives in a Gettext `.po` file. Then compilation fails and tells you
+  to run `mix verified_translations.extract`
 * every configured locale except the source locale has a non-empty translation
+* plural translations have exactly the CLDR categories of their locale
 * translations only use `%{bindings}` that the call site provides
-* the file has no unknown locale keys (catches typos like `"fl"`) and its `msgid` matches
+* the file has no unknown locale keys (catches typos like `"fl"`) and its `msgid`, `msgctxt` and
+  `kind` match
 
 A module reports all of its failures at once.
 
@@ -61,14 +65,82 @@ A module reports all of its failures at once.
 ~t"Hello #{name}"                # msgid "Hello %{name}"
 ~t"Hello #{@name}"               # works in HEEx and LiveView: %{name}
 ~t"By #{@post.author.name}"      # full path: %{post_author_name}
-~t"#{a.name} meets #{b.name}"    # %{a_name} meets %{b_name}
+~t"#{length(items)} left"        # call name: %{length}
+~t"Hi #{name = String.upcase(u)}" # explicit key: %{name}
 ~t"Line one\nline two"           # escapes work like in strings
 ```
 
-Only variables, assigns and field access can be interpolated. Bind anything else to a variable
-first. Bindings must implement `String.Chars`. The source text renders for the source locale and
-for unknown locales. To change the English copy without changing the code, add an `"en"` key to
-the file.
+Binding keys follow the [gettext_sigils](https://hexdocs.pm/gettext_sigils) rules, so the same
+`~t` produces the same msgid in both libraries:
+
+* variables and assigns use their name
+* field access joins the path (`user_name`)
+* calls use the function name (`length`, `string_upcase`)
+* other expressions get `var`
+* keys are downcased
+
+Use `key = expr` to pick a name. Two different expressions with the same key are a compile error.
+Bindings must implement `String.Chars`.
+
+The source text renders for the source locale and for unknown locales. To change the English copy
+without changing the code, add an `"en"` key to the file.
+
+## Plurals
+
+```elixir
+tn(length(files), one: "%{count} file", other: "%{count} files")
+tn(@n, one: "#{@user.name} has one item", other: "#{@user.name} has %{count} items")
+~t"#{count = length(errors)} error(s)"N     # gettext_sigils style: one source text
+```
+
+```json
+{
+  "kind": "plural",
+  "msgid": "%{count} files",
+  "fi": {
+    "one": "%{count} tiedosto",
+    "other": "%{count} tiedostoa"
+  },
+  "ru": {
+    "one": "%{count} файл",
+    "few": "%{count} файла",
+    "many": "%{count} файлов",
+    "other": "%{count} файла"
+  }
+}
+```
+
+Plurals use [CLDR plural categories](https://cldr.unicode.org/index/cldr-spec/plural-rules). Each
+locale must have exactly its own categories: `one`/`other` for Finnish, four for Russian, six for
+Arabic and only `other` for Japanese. A missing or extra category is a compile error that names
+it. `tn/2` takes exactly the source locale's categories in code, and `%{count}` is its first
+argument.
+
+The CLDR 49 rules are bundled and compiled into `VerifiedTranslations.Plural`, so plurals need no
+`ex_cldr` dependency and no backend. Every sample value CLDR publishes for every language is
+tested. Counts can be integers, floats, `Decimal`s or strings; `"1.0"` keeps its visible fraction
+digit, which some languages care about.
+
+## Domains, contexts and modifiers
+
+The options of gettext_sigils work unchanged:
+
+```elixir
+use VerifiedTranslations,
+  backend: MyAppWeb.Gettext,           # also `use Gettext`, so gettext/1 etc. keep working
+  sigils: [
+    domain: "frontend",                # priv/translations/frontend/
+    context: "dashboard",              # stored as "msgctxt", part of the file identity
+    modifiers: [
+      e: [domain: "errors"],           # ~t"Not found"e
+      g: [domain: :default, context: nil],
+      u: MyApp.UpcaseModifier          # module with init/1, domain_context/3,
+    ]                                  # preprocess/2 and/or postprocess/2
+  ]
+```
+
+Modifier modules use the same callbacks as `GettextSigils.Modifier`. Custom `pluralize/2` modifiers
+aren't supported; use `N` or `tn/2`.
 
 ## Installation
 
@@ -107,8 +179,28 @@ gettext("Welcome back, %{name}! You have %{n} items.", name: @user.name, n: @cou
   `%{user_name}` and `%{n}` becomes `%{count}`.
 * It removes migrated messages from the `.po` and `.pot` files unless a remaining `gettext` call
   still uses them.
-* It lists the calls left on Gettext, with file and line. These are plurals (`ngettext`),
-  contexts (`pgettext`), other domains, and bindings that aren't a variable, assign or field.
+* `ngettext` becomes `tn/2`. Gettext's `msgstr[0..n]` are mapped to CLDR categories by asking
+  the PO file's `Plural-Forms` rule which form it picks for a count in each category.
+* A binding that isn't a variable, assign or field keeps its Gettext name, so its msgid doesn't
+  change: `name: String.upcase(u)` becomes `#{name = String.upcase(u)}`.
+* It lists the calls left on Gettext, with file and line: contexts (`pgettext`) and other
+  domains.
+
+**From gettext_sigils:** migrate replaces `use GettextSigils` with `use VerifiedTranslations`
+(the options are compatible) and removes the dependency. Existing `~t` sigils produce the same
+msgids, so the `mix verified_translations.extract` it schedules imports their translations,
+plurals and domains included.
+
+**Leftover PO translations fail the build.** If a `~t` has no JSON file but its translation still
+lives in a `.po` file, compilation stops instead of creating an empty stub:
+
+```
+"Upgrade now": translations for fi are still in Gettext PO files under priv/gettext. Move them to JSON with:
+
+        mix verified_translations.extract
+```
+
+`extract` then creates the JSON file filled from the PO translation.
 
 ### Configuration
 
@@ -117,6 +209,7 @@ config :verified_translations,
   locales: ["en", "fi", "sv"],
   source_locale: "en",            # language of the text written in ~t
   path: "priv/translations",
+  gettext_path: "priv/gettext",   # checked for leftover PO translations
   create_missing: true,           # write stub files for new messages
   gettext_backend: MyAppWeb.Gettext
 ```
@@ -250,10 +343,12 @@ cd example && mix deps.get && mix test
 
 ## Limitations
 
-* No plurals or `msgctxt` yet. Keep using `ngettext` for plurals.
+* Ordinal plurals ("1st", "2nd") and select/gender messages aren't supported. Use separate
+  messages with an Elixir `case`.
 * A locale switch inside a LiveView needs a remount (see [Locale](#locale)).
 * `unused --delete` doesn't support several umbrella apps sharing one translation directory.
 
 ## License
 
-MIT
+MIT. The bundled CLDR plural rules (`priv/cldr/plurals.json`, CLDR 49) are under the
+[Unicode License v3](priv/cldr/LICENSE).

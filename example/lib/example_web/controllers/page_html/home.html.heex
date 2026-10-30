@@ -60,7 +60,10 @@
       {~t"Peace of mind from prototype to production."}
     </p>
     <p class="mt-4 leading-7 text-base-content/70">
-      {~t"Welcome, #{@name}!"}
+      {~t"Welcome, #{@name}!"} {tn(@count,
+        one: "You have one new message",
+        other: "You have %{count} new messages"
+      )}
     </p>
     <div class="flex">
       <div class="w-full sm:w-auto">

@@ -55,7 +55,8 @@ defmodule VerifiedTranslations.MigrateTest do
               {"Hi %{name}", "Moi %{name}"},
               {"Welcome, %{name}!", "Tervetuloa, %{name}!"},
               {"Kept", "Pidetty"}
-            ])
+            ]) <>
+              ~s|\nmsgid "1 file"\nmsgid_plural "%{count} files"\nmsgstr[0] "%{count} tiedosto"\nmsgstr[1] "%{count} tiedostoa"\n|
         }
       )
       |> Igniter.compose_task("verified_translations.migrate", ["--locales", "en,fi"])
@@ -72,10 +73,12 @@ defmodule VerifiedTranslations.MigrateTest do
     assert page =~ ~S|<p title={~t"Settings"}>gettext("Visible text")</p>|
     assert page =~ ~S|<p>{~t"Welcome, #{@current_user.name}!"}</p>|
 
+    # plurals become tn/2, computed bindings keep their key
+    assert page =~ ~S|tn(n, one: "1 file", other: "%{count} files")|
+    assert page =~ ~S|~t"Hi #{name = String.upcase(u)}"|
+
     # left on gettext
-    assert page =~ ~S|ngettext("1 file", "%{count} files", n)|
     assert page =~ ~S|dgettext("errors", "is invalid")|
-    assert page =~ ~S|gettext("Hi %{name}", name: String.upcase(u))|
 
     assert content(igniter, "lib/test_web/live/page.html.heex") =~ ~S|{~t"Quote \"me\""}|
     assert content(igniter, "lib/test/plain.ex") =~ ~S|gettext("Not a web module")|
@@ -97,6 +100,20 @@ defmodule VerifiedTranslations.MigrateTest do
              }
 
     assert json.(~S|Quote "me"|) == %{"msgid" => ~S|Quote "me"|, "fi" => ""}
+
+    # computed binding: msgid unchanged
+    assert json.("Hi %{name}") == %{"msgid" => "Hi %{name}", "fi" => "Moi %{name}"}
+
+    plural_path =
+      VerifiedTranslations.Message.path("priv/translations", "default", "%{count} files",
+        plural: [{"one", "1 file"}, {"other", "%{count} files"}]
+      )
+
+    assert igniter |> content(plural_path) |> JSON.decode!() == %{
+             "kind" => "plural",
+             "msgid" => "%{count} files",
+             "fi" => %{"one" => "%{count} tiedosto", "other" => "%{count} tiedostoa"}
+           }
   end
 
   test "prunes migrated messages still not used by gettext", %{igniter: igniter} do
@@ -106,15 +123,45 @@ defmodule VerifiedTranslations.MigrateTest do
     refute fi =~ ~s(msgid "Settings")
     refute fi =~ ~s(msgid "Welcome, %{name}!")
     assert fi =~ ~s(msgid "Kept")
-    # still used by the gettext call with a computed binding
-    assert fi =~ ~s(msgid "Hi %{name}")
+    refute fi =~ ~s(msgid "1 file")
     refute pot =~ ~s(msgid "Settings")
   end
 
   test "reports calls left on gettext", %{igniter: igniter} do
     skipped = Enum.find(igniter.notices, &(&1 =~ "left"))
-    assert skipped =~ "plural (ngettext)"
     assert skipped =~ ~s(domain "errors")
-    assert skipped =~ "binding %{name} is not a variable, assign or field"
+    refute skipped =~ "ngettext"
+  end
+end
+
+defmodule VerifiedTranslations.MigrateGettextSigilsTest do
+  use ExUnit.Case, async: true
+
+  import Igniter.Test
+
+  test "replaces gettext_sigils and schedules the PO import" do
+    igniter =
+      test_project(
+        files: %{
+          "lib/test_web.ex" => """
+          defmodule TestWeb do
+            def html do
+              quote do
+                use GettextSigils, backend: TestWeb.Gettext, sigils: [modifiers: [e: [domain: "errors"]]]
+              end
+            end
+          end
+          """
+        }
+      )
+      |> Igniter.compose_task("verified_translations.migrate", ["--locales", "en,fi"])
+
+    content =
+      igniter.rewrite |> Rewrite.source!("lib/test_web.ex") |> Rewrite.Source.get(:content)
+
+    assert content =~
+             ~S|use VerifiedTranslations, backend: TestWeb.Gettext, sigils: [modifiers: [e: [domain: "errors"]]]|
+
+    assert {"verified_translations.extract", []} in igniter.tasks
   end
 end

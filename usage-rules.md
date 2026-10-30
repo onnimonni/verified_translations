@@ -6,10 +6,12 @@ locale fails `mix compile`. Never work around that: translate the message.
 ## Writing text
 
 - Write user-facing text as `~t"..."` in templates and code. Inside HEEx use `{~t"..."}`.
-- Interpolate only variables, assigns or field access: `~t"Hi #{@user.name}"`. The binding is
-  named after the full path (`%{user_name}`). Bind other expressions to a variable first.
-- Never write a literal `%{x}` inside `~t`; interpolate a variable instead.
-- `~t` has no plural support yet. Use `ngettext/3` for plurals.
+- Interpolate values directly: `~t"Hi #{@user.name}"` binds `%{user_name}`. Prefer variables,
+  assigns and fields; name other expressions explicitly: `~t"#{count = length(items)} left"`.
+- Never write a literal `%{x}` inside `~t`; interpolate a value instead.
+- Plurals: `tn(count, one: "%{count} file", other: "%{count} files")`. Give exactly the source
+  locale's CLDR categories in code. In the JSON file each locale needs exactly its own
+  categories, e.g. Russian `one`, `few`, `many`, `other`.
 - The module needs `use VerifiedTranslations`. Phoenix web modules get it from `use MyAppWeb, :html`.
 
 ## Translating
@@ -38,9 +40,9 @@ mix compile                                 # must pass
 - Run `mix verified_translations.migrate --dry-run`, review the diff, then run it without
   `--dry-run`. Don't rewrite `gettext` calls to `~t` by hand: the task also moves the
   translations and renames their placeholders.
-- Calls it reports as left on Gettext (plurals, contexts, other domains, computed bindings) stay
-  on Gettext. To convert one with a computed binding, bind the value to a variable first and run
-  the task again.
+- Calls it reports as left on Gettext (contexts, other domains) stay on Gettext.
+- If compilation says translations "are still in Gettext PO files", run
+  `mix verified_translations.extract`. It moves them into JSON.
 
 ## Locale
 

@@ -107,9 +107,11 @@ defmodule VerifiedTranslationsTest do
     assert compile_error(dir, ~S|{~t"One", ~t"Two"}|) =~ "2 untranslated message(s)"
   end
 
-  test "rejects complex interpolations and literal placeholders", %{tmp_dir: dir} do
-    assert compile_error(dir, ~S|~t"Hi #{String.upcase(name)}"|) =~ "only interpolates variables"
+  test "rejects literal placeholders and ambiguous keys", %{tmp_dir: dir} do
     assert compile_error(dir, ~S|~t"Hi %{name}"|) =~ "literal %{name}"
+
+    assert compile_error(dir, ~S|~t"#{name} #{name = user}"|) =~
+             "ambiguous interpolation keys name"
   end
 
   test "file without msgid is rejected", %{tmp_dir: dir} do
@@ -189,6 +191,18 @@ defmodule VerifiedTranslationsTest do
 
       assert parse(~S|Line\nbreak|) == {"Line\nbreak", []}
       assert parse(~S|#{a} and #{a}|) == {"%{a} and %{a}", [:a]}
+    end
+
+    # same keys as gettext_sigils, so their PO msgids import 1:1
+    test "gettext_sigils compatible keys" do
+      assert parse(~S|#{count = length(xs)} items|) == {"%{count} items", [:count]}
+      assert parse(~S|#{length(xs)}|) == {"%{length}", [:length]}
+      assert parse(~S|#{String.upcase(x)}|) == {"%{string_upcase}", [:string_upcase]}
+      assert parse(~S|#{a + b}|) == {"%{var}", [:var]}
+      assert parse(~S|#{userName}|) == {"%{username}", [:username]}
+
+      assert parse(~S|#{fruit.name} is #{color}|) ==
+               {"%{fruit_name} is %{color}", [:fruit_name, :color]}
     end
   end
 

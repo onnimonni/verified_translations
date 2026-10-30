@@ -7,7 +7,10 @@ defmodule Mix.Tasks.VerifiedTranslations.Put do
       mix verified_translations.put --domain admin "Settings" fi=Asetukset
       mix verified_translations.put --from translations.json
 
-  `--from` reads a JSON array of objects shaped like the message files:
+  `--from` reads a JSON array of objects shaped like the message files, as
+  printed by `mix verified_translations.missing --json`. Plural messages
+  take an object of CLDR forms per locale, and the `"path"` from `missing`
+  identifies plural and context messages:
 
       [{"msgid": "Hello %{name}", "fi": "Hei %{name}"}, {"msgid": "Save", "fi": "Tallenna"}]
 
@@ -48,7 +51,10 @@ defmodule Mix.Tasks.VerifiedTranslations.Put do
     end
 
     Enum.each(messages, fn {msgid, translations} ->
-      path = Message.path(config.path, domain, msgid)
+      # `missing --json` gives the path: plural and context messages hash more than the msgid
+      {path, translations} =
+        Map.pop(translations, "path", Message.path(config.path, domain, msgid))
+
       Message.update!(path, msgid, translations)
       Mix.shell().info("#{path}: #{translations |> Map.keys() |> Enum.sort() |> Enum.join(", ")}")
     end)
@@ -69,8 +75,11 @@ defmodule Mix.Tasks.VerifiedTranslations.Put do
     case JSON.decode(content) do
       {:ok, list} when is_list(list) ->
         Enum.map(list, fn
-          %{"msgid" => msgid} = data when is_binary(msgid) -> {msgid, Map.delete(data, "msgid")}
-          other -> Mix.raise("each entry needs a \"msgid\", got: #{inspect(other)}")
+          %{"msgid" => msgid} = data when is_binary(msgid) ->
+            {msgid, Map.drop(data, ["msgid", "msgctxt", "kind", "domain", "missing"])}
+
+          other ->
+            Mix.raise("each entry needs a \"msgid\", got: #{inspect(other)}")
         end)
 
       _ ->
@@ -81,8 +90,16 @@ defmodule Mix.Tasks.VerifiedTranslations.Put do
   defp validate(msgid, translations, config) do
     allowed = Message.bindings(msgid)
 
-    Enum.flat_map(translations, fn {locale, text} ->
+    translations
+    |> Map.delete("path")
+    |> Enum.flat_map(fn {locale, text} ->
       cond do
+        is_map(text) ->
+          Enum.flat_map(text, fn {category, form} ->
+            validate(msgid, %{"#{locale}" => form}, config)
+            |> Enum.map(&String.replace(&1, ": #{locale} ", ": #{locale}.#{category} "))
+          end)
+
         locale not in config.locales ->
           [
             "#{inspect(msgid)}: #{inspect(locale)} is not in configured locales #{inspect(config.locales)}"

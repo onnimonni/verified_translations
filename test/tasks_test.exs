@@ -51,4 +51,31 @@ defmodule VerifiedTranslations.TasksTest do
     assert error.message =~ ~s("xx" is not in configured locales)
     refute File.exists?(Message.path(dir, "default", "Hi %{name}"))
   end
+
+  test "plural messages round-trip through missing --json and put --from", %{tmp_dir: dir} do
+    forms = [{"one", "%{count} file"}, {"other", "%{count} files"}]
+    path = Message.path(dir, "default", "%{count} files", plural: forms)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, Message.encode("%{count} files", %{}, plural: true))
+
+    [entry] = JSON.decode!(capture_io(fn -> run("verified_translations.missing", ["--json"]) end))
+    assert entry["fi"] == %{"one" => "", "other" => ""}
+    assert entry["path"] == path
+
+    filled =
+      Map.merge(entry, %{
+        "fi" => %{"one" => "%{count} tiedosto", "other" => "%{count} tiedostoa"},
+        "sv" => %{"one" => "%{count} fil", "other" => "%{count} filer"}
+      })
+
+    batch = Path.join(dir, "batch.json")
+    File.write!(batch, JSON.encode!([filled]))
+    run("verified_translations.put", ["--from", batch])
+
+    assert {:ok, data, content} = Message.read(path)
+    assert data["kind"] == "plural"
+    assert data["fi"] == %{"one" => "%{count} tiedosto", "other" => "%{count} tiedostoa"}
+    assert content =~ ~s({\n  "kind": "plural",\n  "msgid": "%{count} files")
+    assert capture_io(fn -> run("verified_translations.missing", ["--json"]) end) == "[]\n"
+  end
 end

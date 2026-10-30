@@ -11,9 +11,14 @@ defmodule ExampleWeb.PageControllerTest do
     html = conn |> get(~p"/?locale=fi") |> html_response(200)
     assert html =~ "Mielenrauhaa prototyypistä tuotantoon."
     assert html =~ "Tervetuloa, Onni!"
+    assert html =~ "Sinulla on 3 uutta viestiä"
     assert html =~ "Yritetään yhdistää uudelleen"
     # Gettext follows the same locale
     assert Gettext.get_locale(ExampleWeb.Gettext) == "fi"
+  end
+
+  test "plural in english", %{conn: conn} do
+    assert conn |> get(~p"/") |> html_response(200) =~ "You have 3 new messages"
   end
 
   test "locale is remembered in the session", %{conn: conn} do

@@ -27,6 +27,8 @@ translation is a compile error that names the file and the locales.
   access. `#{@user.name}` becomes the binding `%{user_name}`.
 - Never edit `"msgid"`, rename translation files or create them by hand.
 - Never bypass verification by using plain strings, `gettext/1` or `create_missing: false`.
-- Plurals aren't supported by `~t` yet; use `ngettext/3`.
+- Plurals: `tn(count, one: "...", other: "...")`. In JSON each locale is an object with exactly its
+  CLDR categories, e.g. `"fi": {"one": "...", "other": "..."}`.
+- "still in Gettext PO files" compile errors: run `mix verified_translations.extract`.
 - Set the locale with `VerifiedTranslations.put_locale/1`, which also sets Gettext's locale.
   A LiveView needs a remount (`push_navigate`) after a locale switch.

@@ -1,0 +1,12 @@
+{
+  "kind": "plural",
+  "msgid": "You have %{count} new messages",
+  "fi": {
+    "one": "Sinulla on yksi uusi viesti",
+    "other": "Sinulla on %{count} uutta viestiä"
+  },
+  "sv": {
+    "one": "Du har ett nytt meddelande",
+    "other": "Du har %{count} nya meddelanden"
+  }
+}
