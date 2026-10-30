@@ -33,6 +33,15 @@ mix compile                                 # must pass
   with `mix verified_translations.unused --delete`.
 - The source locale (usually `en`) is the msgid itself and needs no entry.
 
+## Migrating existing gettext code
+
+- Run `mix verified_translations.migrate --dry-run`, review the diff, then run it without
+  `--dry-run`. Don't rewrite `gettext` calls to `~t` by hand: the task also moves the
+  translations and renames their placeholders.
+- Calls it reports as left on Gettext (plurals, contexts, other domains, computed bindings) stay
+  on Gettext. To convert one with a computed binding, bind the value to a variable first and run
+  the task again.
+
 ## Locale
 
 - `VerifiedTranslations.put_locale("fi")` sets the locale for the current process and for

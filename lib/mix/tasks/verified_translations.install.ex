@@ -11,8 +11,9 @@ defmodule Mix.Tasks.VerifiedTranslations.Install.Docs do
 
     * configures `:verified_translations` locales in `config/config.exs`
     * adds `use VerifiedTranslations` next to every `use Gettext, backend: ...` in `lib/`
-    * rewrites `gettext("literal")` calls to `~t"literal"`
-    * imports existing translations from `priv/gettext` (when present)
+    * runs `mix verified_translations.migrate`: rewrites `gettext` calls (with
+      bindings, in code, `~H` and `.heex`) to `~t`, moves their translations
+      from `priv/gettext` into `priv/translations` and prunes the PO files
     * adds `priv/translations` to Phoenix live reload patterns
 
     ## Example
@@ -44,6 +45,7 @@ if Code.ensure_loaded?(Igniter) do
       %Igniter.Mix.Task.Info{
         group: :verified_translations,
         example: Mix.Tasks.VerifiedTranslations.Install.Docs.example(),
+        composes: ["verified_translations.migrate"],
         schema: [locales: :csv],
         defaults: [locales: []]
       }
@@ -75,10 +77,11 @@ if Code.ensure_loaded?(Igniter) do
         {:code, Sourceror.parse_string!("#{web}.Gettext")}
       )
       |> update_sources("lib/**/*.ex", &add_use/1)
-      |> Igniter.update_glob("lib/**/*.ex", &code_gettext_to_sigil(&1, web))
-      |> update_sources("lib/**/*.{ex,heex}", &heex_gettext_to_sigil(&1, web))
+      |> Igniter.compose_task("verified_translations.migrate", [
+        "--locales",
+        Enum.join(locales, ",")
+      ])
       |> add_live_reload_pattern()
-      |> maybe_import_po()
       |> Igniter.add_notice("""
       verified_translations installed.
 
@@ -137,59 +140,6 @@ if Code.ensure_loaded?(Igniter) do
     defp add_use(content),
       do: Regex.replace(@use_gettext, content, "\\0\\1use VerifiedTranslations\n")
 
-    # only convert where ~t is available: directly or through the web module
-    defp sigil_available?(content, web) do
-      content =~ ~r/^\s*use VerifiedTranslations\b/m or content =~ "use #{web},"
-    end
-
-    # gettext("Literal") calls in Elixir code, excluding function heads
-    defp code_gettext_to_sigil(zipper, web) do
-      if sigil_available?(zipper |> Zipper.node() |> Sourceror.to_string(), web) do
-        Common.update_all_matches(zipper, &plain_gettext_call?/1, fn zipper ->
-          {:code, Sourceror.parse_string!(~s|~t"#{literal(zipper)}"|)}
-        end)
-      else
-        {:ok, zipper}
-      end
-    end
-
-    defp plain_gettext_call?(zipper) do
-      Igniter.Code.Function.function_call?(zipper, :gettext, 1) and
-        not definition_head?(zipper) and
-        case literal(zipper) do
-          text when is_binary(text) -> not String.contains?(text, ["\"", "\#{", "%{", "\\"])
-          _ -> false
-        end
-    end
-
-    defp definition_head?(zipper) do
-      case Zipper.up(zipper) do
-        %Zipper{node: {kind, _, _}} when kind in [:def, :defp, :defmacro, :defmacrop, :when] ->
-          true
-
-        _ ->
-          false
-      end
-    end
-
-    defp literal(zipper) do
-      with {:ok, arg} <- Igniter.Code.Function.move_to_nth_argument(zipper, 0),
-           {:__block__, _, [text]} when is_binary(text) <- Zipper.node(arg) do
-        text
-      else
-        _ -> nil
-      end
-    end
-
-    # HEEx is a string, not Elixir AST: only exact `{gettext("Literal")}` expressions
-    @heex_gettext ~r/\{gettext\("([^"\\#%]*)"\)\}/
-
-    defp heex_gettext_to_sigil(content, web) do
-      if sigil_available?(content, web) or not String.contains?(content, "defmodule"),
-        do: Regex.replace(@heex_gettext, content, ~S|{~t"\1"}|),
-        else: content
-    end
-
     defp add_live_reload_pattern(igniter) do
       Enum.reduce(["config/runtime.exs", "config/dev.exs"], igniter, fn file, igniter ->
         if Igniter.exists?(igniter, file),
@@ -240,14 +190,6 @@ if Code.ensure_loaded?(Igniter) do
       do: Enum.all?(items, &match?({:sigil_r, _, _}, &1))
 
     defp list_of_regexes?(_), do: false
-
-    defp maybe_import_po(igniter) do
-      if File.dir?("priv/gettext") and Code.ensure_loaded?(Expo.PO) do
-        Igniter.add_task(igniter, "verified_translations.import_po")
-      else
-        igniter
-      end
-    end
   end
 else
   defmodule Mix.Tasks.VerifiedTranslations.Install do

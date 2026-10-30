@@ -82,14 +82,33 @@ The installer:
 
 * adds `config :verified_translations, locales: [...], source_locale: "en", gettext_backend: ...`
 * adds `use VerifiedTranslations` after every `use Gettext, backend: ...` (idempotent)
-* rewrites `gettext("literal")` calls in Elixir code and `{gettext("literal")}` HEEx expressions
-  to `~t"literal"`, only in modules that get the sigil. Function heads, docs and plain text are
-  left alone
-* imports existing translations from `priv/gettext/*/LC_MESSAGES/*.po`
+* runs `mix verified_translations.migrate` (see [Migrating from Gettext](#migrating-from-gettext))
 * adds `priv/translations` to the Phoenix live reload patterns
 
 To install manually, add `{:verified_translations, "~> 0.1"}`, the config above and
 `use VerifiedTranslations` in the `html_helpers` of `lib/my_app_web.ex`.
+
+### Migrating from Gettext
+
+`mix verified_translations.migrate` (run by the installer, and safe to run again) moves an existing
+Gettext app over. Add `--dry-run` to review the diff first.
+
+```elixir
+gettext("Welcome back, %{name}! You have %{n} items.", name: @user.name, n: @count)
+# becomes
+~t"Welcome back, #{@user.name}! You have #{@count} items."
+```
+
+* It rewrites `gettext/1,2` and `dgettext("default", ...)` in Elixir code, `~H` templates and
+  `.heex` files, with minimal patches that leave the rest of each file untouched. Function heads,
+  docs and plain template text are left alone.
+* It moves each converted message's translations from `priv/gettext/*/LC_MESSAGES/default.po`
+  into its JSON file. Placeholders are renamed to the names `~t` uses: `%{name}` becomes
+  `%{user_name}` and `%{n}` becomes `%{count}`.
+* It removes migrated messages from the `.po` and `.pot` files unless a remaining `gettext` call
+  still uses them.
+* It lists the calls left on Gettext, with file and line. These are plurals (`ngettext`),
+  contexts (`pgettext`), other domains, and bindings that aren't a variable, assign or field.
 
 ### Configuration
 
@@ -152,7 +171,8 @@ mix verified_translations.unused    # CI: fail on translation files no ~t uses (
 | `missing [--json]` | lists messages lacking a locale, without compiling. The JSON goes straight back into `put --from` |
 | `put MSGID locale=text…` | writes translations and validates locales and `%{bindings}` first. `--from file.json` (or `-` for stdin) takes many messages at once; `--domain` picks the domain |
 | `unused [--delete]` | lists or deletes files no `~t` uses. Exits non-zero for CI |
-| `import_po` | migrates translations from Gettext `.po` files |
+| `migrate` | rewrites `gettext` calls to `~t` and moves their translations (Igniter, supports `--dry-run`) |
+| `import_po` | imports all translations from Gettext `.po` files, without touching code |
 
 `mix compile` also creates stub files. `extract` creates them for every module in a single pass,
 including modules that would otherwise wait on a failing dependency. It also adds empty keys when
