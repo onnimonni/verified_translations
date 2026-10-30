@@ -13,18 +13,21 @@ translation is a compile error that names the file and the locales.
 
 1. `mix verified_translations.extract` creates the files for every new `~t` message.
 2. `mix verified_translations.missing --json > /tmp/missing.json` lists the empty locales.
-3. Write each translation into the JSON entries. Keep every `%{binding}` from `"msgid"`, and
-   remove the `"missing"` and `"domain"` keys or leave them; they're ignored.
-4. `mix verified_translations.put --from /tmp/missing.json`, or one message at a time:
-   `mix verified_translations.put "Save" fi=Tallenna sv=Spara`. `put` rejects unknown locales
-   and bindings and writes nothing when anything is invalid.
+3. Write and verify each translation in the JSON entries (meaning, placeholders, consistency with
+   existing translations, plural forms, length; see the verification checklist in the package's
+   usage rules). Keep every `%{binding}` from `"msgid"`. The `"missing"`, `"domain"` and
+   `"path"` keys can stay; `put` uses `"path"` to find plural and context files.
+4. `mix verified_translations.put --model <your-model-id> --from /tmp/missing.json`, or one message
+   at a time: `mix verified_translations.put --model <your-model-id> "Save" fi=Tallenna sv=Spara`.
+   This records them as unreviewed machine translations with your model ID. `put` rejects
+   unknown locales and bindings and writes nothing when anything is invalid.
 5. `mix compile` must pass. Run `mix verified_translations.unused --delete` when text was
    changed or removed.
 
 ## Rules
 
-- Write text as `~t"..."`, with `{~t"..."}` in HEEx. Interpolate only variables, assigns or field
-  access. `#{@user.name}` becomes the binding `%{user_name}`.
+- Write text as `~t"..."`, with `{~t"..."}` in HEEx. `#{@user.name}` becomes the binding
+  `%{user_name}`; name other expressions explicitly: `#{count = length(items)}`.
 - Never edit `"msgid"`, rename translation files or create them by hand.
 - Never bypass verification by using plain strings, `gettext/1` or `create_missing: false`.
 - Plurals: `tn(count, one: "...", other: "...")`. In JSON each locale is an object with exactly its
@@ -32,3 +35,5 @@ translation is a compile error that names the file and the locales.
 - "still in Gettext PO files" compile errors: run `mix verified_translations.extract`.
 - Set the locale with `VerifiedTranslations.put_locale/1`, which also sets Gettext's locale.
   A LiveView needs a remount (`push_navigate`) after a locale switch.
+- Never pass `--human` to `put` and never run `mix verified_translations.review --approve`: only
+  people who checked the translations approve them. Leave a locale empty if unsure.

@@ -15,12 +15,17 @@ defmodule VerifiedTranslations.Compiler do
     context: nil,
     modifiers: [],
     create_missing: true,
+    # :allow | :warn | :error for translations marked "machine" in "origin"
+    machine_translations: :allow,
     gettext_backend: nil
   ]
 
   @keys Keyword.keys(@defaults)
 
   @extract_env "VERIFIED_TRANSLATIONS_EXTRACT"
+
+  # JSON keys that aren't locales
+  @meta_keys ["msgid", "msgctxt", "kind", "origin"]
 
   @doc "Runtime config: application env over defaults."
   def config(opts \\ []) do
@@ -45,6 +50,24 @@ defmodule VerifiedTranslations.Compiler do
 
   @doc false
   def extract_env, do: @extract_env
+
+  @doc false
+  # runs `fun` (which compiles) with verification off, like `extract`, then
+  # re-enables compilation so a later compile in this VM verifies again
+  def without_verification(fun) do
+    previous = System.get_env(@extract_env)
+    System.put_env(@extract_env, "1")
+
+    try do
+      fun.()
+    after
+      if previous,
+        do: System.put_env(@extract_env, previous),
+        else: System.delete_env(@extract_env)
+
+      Enum.each(["compile", "compile.all", "compile.elixir"], &Mix.Task.reenable/1)
+    end
+  end
 
   ## use VerifiedTranslations
 
@@ -172,6 +195,12 @@ defmodule VerifiedTranslations.Compiler do
     {ordinal?, forms} = Keyword.pop(forms, :ordinal, false)
     type = if ordinal? == true, do: :ordinal, else: :cardinal
 
+    # tn(n, domain: "errors", context: "cart", one: ..., other: ...)
+    {domain, forms} = Keyword.pop(forms, :domain, config.domain)
+    {context, forms} = Keyword.pop(forms, :context, config.context)
+    domain = if domain == :default, do: "default", else: literal!(domain, "domain", env)
+    context = context && literal!(context, "context", env)
+
     {source_forms, bindings} =
       Enum.reduce(forms, {%{}, []}, fn {category, text}, {forms, bindings} ->
         parts =
@@ -204,8 +233,8 @@ defmodule VerifiedTranslations.Compiler do
 
     message = %{
       msgid: source_forms["other"],
-      domain: config.domain,
-      context: config.context,
+      domain: domain,
+      context: context,
       plural: true,
       type: type,
       source_forms: source_forms,
@@ -341,7 +370,15 @@ defmodule VerifiedTranslations.Compiler do
 
     {translations, fingerprint} =
       case load(path, message, names, config) do
-        {:ok, translations, fingerprint} ->
+        {:ok, translations, fingerprint, machine} ->
+          if machine != [] and config.machine_translations == :warn do
+            IO.warn(
+              "#{inspect(message.msgid)}: unreviewed machine translation for " <>
+                "#{Enum.join(machine, ", ")}; review with mix verified_translations.review",
+              env
+            )
+          end
+
           {translations, fingerprint}
 
         {:error, problem, fingerprint} ->
@@ -424,7 +461,7 @@ defmodule VerifiedTranslations.Compiler do
 
         case validate(data, message, names, required, config) do
           [] ->
-            {:ok, Map.drop(data, ["msgid", "msgctxt", "kind"]), :erlang.md5(content)}
+            {:ok, Map.drop(data, @meta_keys), :erlang.md5(content), machine_locales(data)}
 
           problems ->
             {:error, Enum.join(problems, "; "), :erlang.md5(content)}
@@ -472,7 +509,7 @@ defmodule VerifiedTranslations.Compiler do
 
       missing ->
         data = Map.merge(data, stub(missing, message, config))
-        translations = Map.drop(data, ["msgid", "msgctxt", "kind"])
+        translations = Map.drop(data, @meta_keys)
         opts = file_opts(message, message.plural)
         File.write!(path, Message.encode(message.msgid, translations, opts))
         data
@@ -480,7 +517,7 @@ defmodule VerifiedTranslations.Compiler do
   end
 
   defp validate(data, message, names, required, config) do
-    known = ["msgid", "msgctxt", "kind" | config.locales]
+    known = @meta_keys ++ config.locales
 
     identity =
       case Map.fetch(data, "msgid") do
@@ -501,7 +538,10 @@ defmodule VerifiedTranslations.Compiler do
 
     values =
       Enum.flat_map(data, fn
-        {key, _} when key in ["msgid", "msgctxt", "kind"] ->
+        {"origin", origin} ->
+          validate_origin(origin, config)
+
+        {key, _} when key in @meta_keys ->
           []
 
         {locale, value} ->
@@ -526,6 +566,60 @@ defmodule VerifiedTranslations.Compiler do
           do: "#{locale} is not translated"
 
     identity ++ values ++ untranslated
+  end
+
+  # "origin": {"fi": {"by": "machine", "model": "claude-opus-5-5", "reviewed": true}};
+  # locales without an entry are human-written
+  defp validate_origin(origin, config) when is_map(origin) do
+    problems =
+      Enum.flat_map(origin, fn {locale, value} ->
+        cond do
+          locale not in config.locales ->
+            ["origin has unknown locale #{inspect(locale)}"]
+
+          not valid_origin?(value) ->
+            [
+              "origin of #{locale} must be like #{inspect(%{"by" => "machine", "model" => "..."})}"
+            ]
+
+          true ->
+            []
+        end
+      end)
+
+    machine = Enum.sort(machine_locales(%{"origin" => origin}))
+
+    if problems == [] and machine != [] and config.machine_translations == :error do
+      [
+        "#{Enum.join(machine, ", ")} not reviewed (machine translation), run mix verified_translations.review"
+      ]
+    else
+      problems
+    end
+  end
+
+  defp validate_origin(_origin, _config), do: ["origin must be an object of locale => origin"]
+
+  defp valid_origin?(%{"by" => by} = origin) when by in ["machine", "human"] do
+    Enum.all?(origin, fn
+      {"by", _} -> true
+      {"model", model} -> is_binary(model)
+      {"reviewed", reviewed} -> is_boolean(reviewed)
+      _ -> false
+    end)
+  end
+
+  defp valid_origin?(_origin), do: false
+
+  # unreviewed machine translations
+  defp machine_locales(data) do
+    case data do
+      %{"origin" => origin} when is_map(origin) ->
+        for {locale, %{"by" => "machine"} = o} <- origin, o["reviewed"] != true, do: locale
+
+      _ ->
+        []
+    end
   end
 
   defp untranslated?(nil), do: true

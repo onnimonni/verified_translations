@@ -19,15 +19,8 @@ defmodule Mix.Tasks.VerifiedTranslations.Extract do
 
   @impl Mix.Task
   def run(_argv) do
-    System.put_env(Compiler.extract_env(), "1")
-
-    try do
-      Mix.Task.run("compile", ["--force"])
-    after
-      System.delete_env(Compiler.extract_env())
-      # extracted modules are stale; let a later compile in this VM verify them
-      Enum.each(["compile", "compile.all", "compile.elixir"], &Mix.Task.reenable/1)
-    end
+    # extracted modules are stale afterwards, so a later compile verifies them
+    Compiler.without_verification(fn -> Mix.Task.run("compile", ["--force"]) end)
 
     config = Compiler.config()
     required = config.locales -- [config.source_locale]

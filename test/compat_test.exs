@@ -167,6 +167,36 @@ defmodule VerifiedTranslations.CompatTest do
     end
   end
 
+  describe "origin" do
+    test "machine_translations: :error blocks unreviewed machine text", %{tmp_dir: dir} do
+      write(dir, "Save", %{
+        "fi" => "Tallenna",
+        "sv" => "Spara",
+        "origin" => %{"fi" => %{"by" => "machine", "model" => "claude-opus-5-5"}}
+      })
+
+      assert compile(dir, "", ~S|def x, do: ~t"Save"|)
+
+      assert error(dir, "machine_translations: :error", ~S|def x, do: ~t"Save"|) =~
+               "fi not reviewed (machine translation)"
+
+      write(dir, "Save", %{
+        "fi" => "Tallenna",
+        "sv" => "Spara",
+        "origin" => %{
+          "fi" => %{"by" => "machine", "model" => "claude-opus-5-5", "reviewed" => true}
+        }
+      })
+
+      assert compile(dir, "machine_translations: :error", ~S|def x, do: ~t"Save"|)
+    end
+
+    test "invalid origin", %{tmp_dir: dir} do
+      write(dir, "Save", %{"fi" => "Tallenna", "sv" => "Spara", "origin" => %{"fi" => "robot"}})
+      assert error(dir, "", ~S|def x, do: ~t"Save"|) =~ "origin of fi must be like"
+    end
+  end
+
   describe "plurals" do
     test "tn/2 with CLDR categories per locale", %{tmp_dir: dir} do
       forms = [one: "%{count} file", other: "%{count} files"]

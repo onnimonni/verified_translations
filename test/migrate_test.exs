@@ -30,6 +30,9 @@ defmodule VerifiedTranslations.MigrateTest do
             def files(n), do: ngettext("1 file", "%{count} files", n)
             def error, do: dgettext("errors", "is invalid")
             def computed(u), do: gettext("Hi %{name}", name: String.upcase(u))
+            def open, do: pgettext("menu", "Open")
+            def errors(n), do: dngettext("errors", "1 error", "%{count} errors", n)
+            def dynamic(msg), do: gettext(msg)
 
             def render(assigns) do
               ~H"""
@@ -42,6 +45,18 @@ defmodule VerifiedTranslations.MigrateTest do
           "lib/test_web/live/page.html.heex" => ~S'''
           <h1>{gettext("Quote \"me\"")}</h1>
           ''',
+          "lib/test_web.ex" => """
+          defmodule TestWeb do
+            def html do
+              quote do
+                use Gettext, backend: TestWeb.Gettext
+                use VerifiedTranslations
+              end
+            end
+          end
+          """,
+          "priv/gettext/fi/LC_MESSAGES/errors.po" =>
+            po("fi", [{"is invalid", "on virheellinen"}]),
           "lib/test/plain.ex" => ~S'''
           defmodule Test.Plain do
             def text, do: gettext("Not a web module")
@@ -77,8 +92,16 @@ defmodule VerifiedTranslations.MigrateTest do
     assert page =~ ~S|tn(n, one: "1 file", other: "%{count} files")|
     assert page =~ ~S|~t"Hi #{name = String.upcase(u)}"|
 
+    # domains and contexts become ~t modifiers defined in the web module
+    assert page =~ ~S|def error, do: ~t"is invalid"e|
+    assert page =~ ~S|def open, do: ~t"Open"m|
+    assert page =~ ~S|tn(n, domain: "errors", one: "1 error", other: "%{count} errors")|
+
+    assert content(igniter, "lib/test_web.ex") =~
+             ~S|use VerifiedTranslations, sigils: [modifiers: [e: [domain: "errors"], m: [context: "menu"]]]|
+
     # left on gettext
-    assert page =~ ~S|dgettext("errors", "is invalid")|
+    assert page =~ ~S|def dynamic(msg), do: gettext(msg)|
 
     assert content(igniter, "lib/test_web/live/page.html.heex") =~ ~S|{~t"Quote \"me\""}|
     assert content(igniter, "lib/test/plain.ex") =~ ~S|gettext("Not a web module")|
@@ -100,6 +123,22 @@ defmodule VerifiedTranslations.MigrateTest do
              }
 
     assert json.(~S|Quote "me"|) == %{"msgid" => ~S|Quote "me"|, "fi" => ""}
+
+    errors_path = VerifiedTranslations.Message.path("priv/translations", "errors", "is invalid")
+
+    assert igniter |> content(errors_path) |> JSON.decode!() == %{
+             "msgid" => "is invalid",
+             "fi" => "on virheellinen"
+           }
+
+    open_path =
+      VerifiedTranslations.Message.path("priv/translations", "default", "Open", context: "menu")
+
+    assert igniter |> content(open_path) |> JSON.decode!() == %{
+             "msgctxt" => "menu",
+             "msgid" => "Open",
+             "fi" => ""
+           }
 
     # computed binding: msgid unchanged
     assert json.("Hi %{name}") == %{"msgid" => "Hi %{name}", "fi" => "Moi %{name}"}
@@ -129,8 +168,8 @@ defmodule VerifiedTranslations.MigrateTest do
 
   test "reports calls left on gettext", %{igniter: igniter} do
     skipped = Enum.find(igniter.notices, &(&1 =~ "left"))
-    assert skipped =~ ~s(domain "errors")
-    refute skipped =~ "ngettext"
+    assert skipped =~ "page.ex:12: dynamic arguments"
+    refute skipped =~ "errors"
   end
 end
 

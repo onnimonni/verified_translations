@@ -35,8 +35,13 @@ defmodule Mix.Tasks.VerifiedTranslations.Migrate.Docs do
     dependency removed. Their `~t` sigils produce the same msgids, so
     `mix verified_translations.extract` imports the existing translations.
 
-    Calls that cannot be expressed are left alone and listed: contexts
-    (`pgettext`) and other domains.
+    Domains and contexts become `~t` modifiers (`dgettext("errors", "x")` ->
+    `~t"x"e`), defined in the `use VerifiedTranslations` that gives the module
+    `~t`; plural ones become `tn(n, domain: "errors", ...)`.
+
+    Calls that cannot be expressed are left alone and listed: dynamic msgids,
+    and domains or contexts without a `use VerifiedTranslations` to define a
+    modifier in.
 
     Only modules that can use `~t` are rewritten (`use VerifiedTranslations`
     or `use MyAppWeb, ...`). Run with `--dry-run` to review the diff.
@@ -71,6 +76,14 @@ if Code.ensure_loaded?(Igniter) do
 
     # Gettext's own placeholder syntax
     @placeholder ~r/%\{(\w+)\}/
+
+    # Igniter compiles the project before running the task. Gettext calls are
+    # verified once `use VerifiedTranslations` is in place, and migrating is
+    # exactly when translations are still missing, so compile like `extract`.
+    @impl Mix.Task
+    def run(argv) do
+      VerifiedTranslations.Compiler.without_verification(fn -> super(argv) end)
+    end
 
     @impl Igniter.Mix.Task
     def info(_argv, _composing_task) do
@@ -161,33 +174,223 @@ if Code.ensure_loaded?(Igniter) do
 
     defp rewrite_sources(igniter, web) do
       matcher = GlobEx.compile!(Path.expand("lib/**/*.{ex,heex}"))
+      web_path = Igniter.Project.Module.proper_location(igniter, Module.concat([web]))
 
-      igniter.rewrite
-      |> Rewrite.sources()
-      |> Enum.filter(&GlobEx.match?(matcher, Path.expand(&1.path)))
-      |> Enum.reduce({igniter, [], []}, fn source, {igniter, conversions, skipped} ->
-        content = Rewrite.Source.get(source, :content)
+      sources =
+        igniter.rewrite
+        |> Rewrite.sources()
+        |> Enum.filter(&GlobEx.match?(matcher, Path.expand(&1.path)))
+        |> Enum.reject(&(Rewrite.Source.get(&1, :content) =~ "use Gettext.Backend"))
+        |> Enum.filter(&sigil_available?(&1.path, Rewrite.Source.get(&1, :content), web))
 
-        if content =~ "use Gettext.Backend" or not sigil_available?(source.path, content, web) do
-          {igniter, conversions, skipped}
-        else
-          {patches, new_conversions, new_skipped} = rewrite(source.path, content)
+      contents =
+        Map.new(Rewrite.sources(igniter.rewrite), &{&1.path, Rewrite.Source.get(&1, :content)})
 
-          igniter =
-            if patches == [],
-              do: igniter,
-              else:
-                Igniter.update_file(igniter, source.path, fn source ->
-                  Rewrite.Source.update(
-                    source,
-                    :content,
-                    Sourceror.patch_string(content, patches)
-                  )
-                end)
+      # per file: [{patch, conversion}], skipped, and the file defining its ~t modifiers
+      files =
+        for source <- sources do
+          content = contents[source.path]
+          {patches, conversions, skipped} = rewrite(source.path, content)
+          provider = modifier_provider(source.path, content, web_path, contents)
 
-          {igniter, conversions ++ new_conversions, skipped ++ new_skipped}
+          {pairs, unprovided} =
+            patches
+            |> Enum.zip(conversions)
+            |> Enum.split_with(fn {_, conversion} -> conversion.modifier == nil or provider end)
+
+          skipped =
+            skipped ++
+              for {_, c} <- unprovided,
+                  do: {c.location, "no `use VerifiedTranslations` to add a ~t modifier to"}
+
+          %{
+            path: source.path,
+            content: content,
+            pairs: pairs,
+            skipped: skipped,
+            provider: provider
+          }
         end
+
+      needed = for f <- files, {_, c} <- f.pairs, c.modifier, uniq: true, do: c.modifier
+
+      providers =
+        for f <- files,
+            f.provider,
+            Enum.any?(f.pairs, &elem(&1, 1).modifier),
+            uniq: true,
+            do: f.provider
+
+      letters = allocate_modifiers(needed, Enum.map(providers, &contents[&1]))
+
+      igniter =
+        Enum.reduce(files, igniter, fn %{path: path, content: content, pairs: pairs}, igniter ->
+          if pairs == [] do
+            igniter
+          else
+            updated =
+              content
+              |> Sourceror.patch_string(Enum.map(pairs, &elem(&1, 0)))
+              |> fill_markers(letters)
+
+            Igniter.update_file(igniter, path, &Rewrite.Source.update(&1, :content, updated))
+          end
+        end)
+
+      igniter =
+        Enum.reduce(providers, igniter, fn path, igniter ->
+          Igniter.update_file(igniter, path, fn source ->
+            content = Rewrite.Source.get(source, :content)
+            Rewrite.Source.update(source, :content, define_modifiers(content, letters))
+          end)
+        end)
+
+      conversions = for f <- files, {_, c} <- f.pairs, do: c
+      skipped = Enum.flat_map(files, & &1.skipped)
+      {igniter, conversions, skipped}
+    end
+
+    ## ~t modifiers for domains and contexts
+
+    # where the module's ~t modifiers are defined: its own `use VerifiedTranslations`
+    # or the web module's
+    defp modifier_provider(path, content, web_path, contents) do
+      cond do
+        content =~ ~r/^\s*use VerifiedTranslations\b/m -> path
+        web_path && (contents[web_path] || "") =~ ~r/^\s*use VerifiedTranslations\b/m -> web_path
+        true -> nil
+      end
+    end
+
+    @domain_modifier ~r/\b([a-z]): \[domain: "([^"]+)"\]/
+    @context_modifier ~r/\b([a-z]): \[context: "([^"]+)"\]/
+    @any_modifier ~r/\b([a-z]): \[/
+
+    # %{{:domain, "errors"} => "e", {:context, "menu"} => "m"}: existing
+    # definitions are reused, new ones get a free letter (the name's first if free)
+    defp allocate_modifiers(needed, provider_contents) do
+      text = Enum.join(provider_contents, "\n")
+
+      existing =
+        Map.merge(
+          for(
+            [_, letter, domain] <- Regex.scan(@domain_modifier, text),
+            into: %{},
+            do: {{:domain, domain}, letter}
+          ),
+          for(
+            [_, letter, context] <- Regex.scan(@context_modifier, text),
+            into: %{},
+            do: {{:context, context}, letter}
+          )
+        )
+
+      used = @any_modifier |> Regex.scan(text) |> Enum.map(&List.last/1) |> MapSet.new()
+
+      wanted =
+        needed
+        |> Enum.flat_map(fn {domain, context} ->
+          [domain && {:domain, domain}, context && {:context, context}]
+        end)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.uniq()
+
+      {letters, _used} =
+        Enum.reduce(wanted, {existing, used}, fn key, {letters, used} ->
+          if Map.has_key?(letters, key) do
+            {letters, used}
+          else
+            {_, name} = key
+
+            candidates =
+              (String.graphemes(String.downcase(name)) ++ Enum.map(?a..?z, &<<&1>>))
+              |> Enum.filter(&(&1 =~ ~r/^[a-z]$/))
+
+            letter = Enum.find(candidates, &(not MapSet.member?(used, &1)))
+            {Map.put(letters, key, letter), MapSet.put(used, letter)}
+          end
+        end)
+
+      letters
+    end
+
+    defp fill_markers(content, letters) do
+      Regex.replace(~r/\x01([^\x01\x02]*)\x02([^\x01]*)\x01/, content, fn _, domain, context ->
+        if(domain == "", do: "", else: letters[{:domain, domain}]) <>
+          if context == "", do: "", else: letters[{:context, context}]
       end)
+    end
+
+    # adds missing modifier definitions to every `use VerifiedTranslations`
+    defp define_modifiers(content, letters) do
+      ~r/^[ \t]*use VerifiedTranslations\b/m
+      |> Regex.scan(content, return: :index)
+      |> Enum.reverse()
+      |> Enum.reduce(content, fn [{start, _}], content ->
+        {statement, rest_start} = statement(content, start)
+        before = binary_part(content, 0, start)
+        rest = binary_part(content, rest_start, byte_size(content) - rest_start)
+
+        missing =
+          letters
+          |> Enum.reject(fn {{_, name}, letter} ->
+            statement =~ ~r/\b#{letter}: \[(domain|context): "#{Regex.escape(name)}"\]/
+          end)
+          |> Enum.sort_by(fn {_, letter} -> letter end)
+          |> Enum.map_join(", ", fn {{kind, name}, letter} ->
+            "#{letter}: [#{kind}: #{inspect(name)}]"
+          end)
+
+        before <> add_to_statement(statement, missing) <> rest
+      end)
+    end
+
+    defp add_to_statement(statement, ""), do: statement
+
+    defp add_to_statement(statement, definitions) do
+      cond do
+        statement =~ "modifiers: [" ->
+          String.replace(statement, "modifiers: [", "modifiers: [#{definitions}, ", global: false)
+
+        statement =~ "sigils: [" ->
+          String.replace(statement, "sigils: [", "sigils: [modifiers: [#{definitions}], ",
+            global: false
+          )
+
+        true ->
+          String.trim_trailing(statement) <> ", sigils: [modifiers: [#{definitions}]]"
+      end
+    end
+
+    # the `use ...` statement starting at `start`: up to the first newline at
+    # bracket depth 0, outside strings
+    defp statement(content, start) do
+      stop = scan_statement(content, start, 0, false)
+      {binary_part(content, start, stop - start), stop}
+    end
+
+    defp scan_statement(content, pos, _depth, _string?) when pos >= byte_size(content), do: pos
+
+    defp scan_statement(content, pos, depth, string?) do
+      case binary_part(content, pos, 1) do
+        "\\" when string? ->
+          scan_statement(content, pos + 2, depth, true)
+
+        "\"" ->
+          scan_statement(content, pos + 1, depth, not string?)
+
+        c when c in ["[", "("] and not string? ->
+          scan_statement(content, pos + 1, depth + 1, false)
+
+        c when c in ["]", ")"] and not string? ->
+          scan_statement(content, pos + 1, depth - 1, false)
+
+        "\n" when depth == 0 and not string? ->
+          pos
+
+        _ ->
+          scan_statement(content, pos + 1, depth, string?)
+      end
     end
 
     # .heex files are compiled into a module using the web module
@@ -381,22 +584,30 @@ if Code.ensure_loaded?(Igniter) do
 
       case {name, args} do
         {:gettext, [msgid | rest]} ->
-          to_sigil(msgid, bindings(rest))
+          to_sigil(msgid, bindings(rest), nil, nil)
 
-        {:dgettext, ["default", msgid | rest]} ->
-          to_sigil(msgid, bindings(rest))
+        {:dgettext, [domain, msgid | rest]} when is_binary(domain) ->
+          to_sigil(msgid, bindings(rest), domain, nil)
+
+        {:pgettext, [context, msgid | rest]} when is_binary(context) ->
+          to_sigil(msgid, bindings(rest), nil, context)
+
+        {:dpgettext, [domain, context, msgid | rest]}
+        when is_binary(domain) and is_binary(context) ->
+          to_sigil(msgid, bindings(rest), domain, context)
 
         {:ngettext, [one, other, count | rest]} ->
-          to_plural(one, other, count, bindings(rest))
+          to_plural(one, other, count, bindings(rest), nil, nil)
 
-        {:dngettext, ["default", one, other, count | rest]} ->
-          to_plural(one, other, count, bindings(rest))
+        {:dngettext, [domain, one, other, count | rest]} when is_binary(domain) ->
+          to_plural(one, other, count, bindings(rest), domain, nil)
 
-        {fun, [domain | _]} when fun in [:dgettext, :dngettext] and is_binary(domain) ->
-          {:skip, "domain #{inspect(domain)}"}
+        {:pngettext, [context, one, other, count | rest]} when is_binary(context) ->
+          to_plural(one, other, count, bindings(rest), nil, context)
 
-        {context, _} when context in [:pgettext, :dpgettext, :pngettext] ->
-          {:skip, "context (#{context})"}
+        {:dpngettext, [domain, context, one, other, count | rest]}
+        when is_binary(domain) and is_binary(context) ->
+          to_plural(one, other, count, bindings(rest), domain, context)
 
         _ ->
           {:skip, "dynamic arguments"}
@@ -412,32 +623,72 @@ if Code.ensure_loaded?(Igniter) do
 
     defp unwrap(other), do: other
 
-    defp to_sigil(msgid, bindings) when is_binary(msgid) and is_list(bindings) do
+    defp domain_of(nil), do: "default"
+    defp domain_of(domain), do: domain
+
+    # ~t takes its domain and context from modifiers: dgettext("errors", "x")
+    # becomes ~t"x" + a placeholder replaced by the allocated letter(s) later
+    defp to_sigil(msgid, bindings, domain, context) when is_binary(msgid) and is_list(bindings) do
+      domain = if domain == "default", do: nil, else: domain
+
       with {:ok, text, renames} <- interpolate(msgid, bindings, []) do
-        {:ok, ~s|~t"#{text}"|,
-         %{kind: :singular, msgid: msgid, new_msgid: rename(msgid, renames), renames: renames}}
+        modifier = if domain || context, do: {domain, context}
+
+        {:ok, ~s|~t"#{text}"| <> marker(modifier),
+         %{
+           kind: :singular,
+           msgid: msgid,
+           new_msgid: rename(msgid, renames),
+           renames: renames,
+           domain: domain_of(domain),
+           context: context,
+           modifier: modifier
+         }}
       end
     end
 
-    defp to_sigil(_msgid, _bindings), do: {:skip, "dynamic arguments"}
+    defp to_sigil(_msgid, _bindings, _domain, _context), do: {:skip, "dynamic arguments"}
+
+    @marker_open <<1>>
+    defp marker(nil), do: ""
+
+    defp marker({domain, context}),
+      do: @marker_open <> "#{domain}" <> <<2>> <> "#{context}" <> @marker_open
 
     # ngettext(one, other, n) -> tn(n, one: ..., other: ...); %{count} stays literal
-    defp to_plural(one, other, count, bindings)
+    defp to_plural(one, other, count, bindings, domain, context)
          when is_binary(one) and is_binary(other) and is_list(bindings) do
+      domain = if domain == "default", do: nil, else: domain
+
       with {:ok, one_text, renames} <- interpolate(one, bindings, ["count"]),
            {:ok, other_text, other_renames} <- interpolate(other, bindings, ["count"]) do
         renames = Map.merge(renames, other_renames)
         forms = %{"one" => rename(one, renames), "other" => rename(other, renames)}
 
+        options =
+          [domain && ~s|domain: #{inspect(domain)}|, context && ~s|context: #{inspect(context)}|]
+          |> Enum.reject(&is_nil/1)
+          |> Enum.map_join(&(&1 <> ", "))
+
         code =
-          ~s|tn(#{Sourceror.to_string(count)}, one: "#{one_text}", other: "#{other_text}")|
+          ~s|tn(#{Sourceror.to_string(count)}, #{options}one: "#{one_text}", other: "#{other_text}")|
 
         {:ok, code,
-         %{kind: :plural, msgid: one, new_msgid: forms["other"], forms: forms, renames: renames}}
+         %{
+           kind: :plural,
+           msgid: one,
+           new_msgid: forms["other"],
+           forms: forms,
+           renames: renames,
+           domain: domain_of(domain),
+           context: context,
+           modifier: nil
+         }}
       end
     end
 
-    defp to_plural(_one, _other, _count, _bindings), do: {:skip, "dynamic arguments"}
+    defp to_plural(_one, _other, _count, _bindings, _domain, _context),
+      do: {:skip, "dynamic arguments"}
 
     # Turns a gettext msgid into ~t text. Variables, assigns and fields get the
     # name ~t derives (%{name} with name: @user.name -> #{@user.name}, renamed
@@ -568,7 +819,7 @@ if Code.ensure_loaded?(Igniter) do
       igniter.rewrite
       |> Rewrite.sources()
       |> Enum.filter(
-        &(Path.basename(&1.path) == "default.po" and
+        &(Path.extname(&1.path) == ".po" and
             String.starts_with?(Path.expand(&1.path), Path.expand(opts[:gettext])))
       )
       |> Enum.map(&{&1.path, Expo.PO.parse_string!(Rewrite.Source.get(&1, :content))})
@@ -577,30 +828,33 @@ if Code.ensure_loaded?(Igniter) do
     defp write_translations(igniter, [], _locales, _opts), do: igniter
 
     defp write_translations(igniter, conversions, [source_locale | _] = locales, opts) do
-      # {locale, msgid} => PO entry, default domain without context
+      # {locale, domain, context, msgid} => PO entry
       catalog =
         for {path, messages} <- po_files(igniter, opts),
-            [_, "LC_MESSAGES", locale | _] = path |> Path.split() |> Enum.reverse(),
+            [domain_file, "LC_MESSAGES", locale | _] = path |> Path.split() |> Enum.reverse(),
             locale in locales and locale != source_locale,
-            {{nil, msgid}, entry} <-
+            {{context, msgid}, entry} <-
               PO.parse(Expo.PO.compose(messages) |> IO.iodata_to_binary(), locale),
             into: %{},
-            do: {{locale, msgid}, entry}
+            do: {{locale, Path.rootname(domain_file), context, msgid}, entry}
 
       conversions
-      |> Enum.uniq_by(&{&1.kind, &1.new_msgid, &1[:forms]})
+      |> Enum.uniq_by(&{&1.kind, &1.domain, &1.context, &1.new_msgid, &1[:forms]})
       |> Enum.reduce(igniter, fn conversion, igniter ->
         %{kind: kind, msgid: msgid, new_msgid: new_msgid, renames: renames} = conversion
         plural = if kind == :plural, do: Message.sorted_forms(conversion.forms)
-        encode_opts = [plural: kind == :plural]
+        %{domain: domain, context: context} = conversion
+        encode_opts = [plural: kind == :plural, context: context]
 
         translations =
           for locale <- locales -- [source_locale], into: %{} do
-            imported = PO.convert(Map.get(catalog, {locale, msgid}), kind, locale)
+            imported =
+              PO.convert(Map.get(catalog, {locale, domain, context, msgid}), kind, locale)
+
             {locale, rename_translation(imported, renames, kind, locale)}
           end
 
-        path = Message.path(opts[:path], "default", new_msgid, plural: plural)
+        path = Message.path(opts[:path], domain, new_msgid, plural: plural, context: context)
 
         Igniter.create_or_update_file(
           igniter,
@@ -612,7 +866,7 @@ if Code.ensure_loaded?(Igniter) do
             case JSON.decode(content) do
               {:ok, %{"msgid" => ^new_msgid} = existing} ->
                 # keep translations already there, fill the empty ones
-                current = Map.drop(existing, ["msgid", "msgctxt", "kind"])
+                current = Map.drop(existing, ["msgid", "msgctxt", "kind", "origin"])
 
                 merged =
                   Map.merge(translations, current, fn _locale, imported, current ->
@@ -659,23 +913,23 @@ if Code.ensure_loaded?(Igniter) do
 
       migrated =
         conversions
-        |> Enum.map(& &1.msgid)
-        |> Enum.uniq()
-        |> Enum.reject(&gettext_reference?(still_used, &1))
-        |> MapSet.new()
+        |> Enum.reject(&gettext_reference?(still_used, &1.msgid))
+        |> MapSet.new(&{&1.domain, &1.context, &1.msgid})
 
       igniter.rewrite
       |> Rewrite.sources()
       |> Enum.filter(
-        &(Path.basename(&1.path) in ["default.po", "default.pot"] and
+        &(Path.extname(&1.path) in [".po", ".pot"] and
             String.starts_with?(Path.expand(&1.path), Path.expand(opts[:gettext])))
       )
       |> Enum.reduce(igniter, fn source, igniter ->
         po = Expo.PO.parse_string!(Rewrite.Source.get(source, :content))
+        domain = source.path |> Path.basename() |> Path.rootname()
 
         kept =
           Enum.reject(po.messages, fn message ->
-            message.msgctxt == nil and IO.iodata_to_binary(message.msgid) in migrated
+            context = if message.msgctxt, do: IO.iodata_to_binary(message.msgctxt)
+            {domain, context, IO.iodata_to_binary(message.msgid)} in migrated
           end)
 
         if length(kept) == length(po.messages) do

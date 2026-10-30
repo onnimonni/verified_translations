@@ -114,7 +114,8 @@ Plurals use [CLDR plural categories](https://cldr.unicode.org/index/cldr-spec/pl
 locale must have exactly its own categories: `one`/`other` for Finnish, four for Russian, six for
 Arabic and only `other` for Japanese. A missing or extra category is a compile error that names
 it. `tn/2` takes exactly the source locale's categories in code, and `%{count}` is its first
-argument.
+argument. `tn(n, domain: "errors", context: "cart", one: ..., other: ...)` sets the domain and
+context.
 
 Ordinals ("1st", "2nd", "3rd") use CLDR's ordinal rules:
 
@@ -167,6 +168,38 @@ check by hand:
 checks: %{extra: [{VerifiedTranslations.Credo.PreferSigil, []}]}
 ```
 
+## Machine translations and review
+
+Every translation can record where it came from. `mix verified_translations.put` marks what it
+writes as machine-translated, with the model that produced it:
+
+```json
+{
+  "msgid": "Welcome back, %{user_name}!",
+  "fi": "Tervetuloa takaisin, %{user_name}!",
+  "sv": "Välkommen tillbaka, %{user_name}!",
+  "origin": {
+    "fi": {"by": "machine", "model": "claude-opus-5-5", "reviewed": true},
+    "sv": {"by": "machine", "model": "claude-opus-5-5"}
+  }
+}
+```
+
+* `put --model claude-opus-5-5` (or `VERIFIED_TRANSLATIONS_MODEL`) records the model. People pass
+  `--human`, which drops the machine marker. Locales without an `origin` entry count as
+  human-written, which covers hand edits and imported Gettext translations.
+* `mix verified_translations.review` lists unreviewed machine translations with their model and
+  exits non-zero (`--json` for scripts). `--approve` (filter with `--locale` and msgids) adds
+  `"reviewed": true` and keeps the model.
+* `config :verified_translations, machine_translations: :error` fails compilation on unreviewed
+  machine translations, for example in CI or production builds. `:warn` only warns, and the
+  default is `:allow`.
+
+The [usage rules](usage-rules.md) tell AI agents to always pass their exact model ID, to verify
+each translation (meaning, placeholders, consistency with existing terms and formality, plural
+forms, length), to leave a locale empty when unsure, and to never approve their own
+translations.
+
 ## Domains, contexts and modifiers
 
 The options of gettext_sigils work unchanged:
@@ -218,20 +251,34 @@ gettext("Welcome back, %{name}! You have %{n} items.", name: @user.name, n: @cou
 ~t"Welcome back, #{@user.name}! You have #{@count} items."
 ```
 
-* It rewrites `gettext/1,2` and `dgettext("default", ...)` in Elixir code, `~H` templates and
-  `.heex` files, with minimal patches that leave the rest of each file untouched. Function heads,
-  docs and plain template text are left alone.
-* It moves each converted message's translations from `priv/gettext/*/LC_MESSAGES/default.po`
-  into its JSON file. Placeholders are renamed to the names `~t` uses: `%{name}` becomes
-  `%{user_name}` and `%{n}` becomes `%{count}`.
+* It rewrites every Gettext macro call in Elixir code, `~H` templates and `.heex` files, with
+  minimal patches that leave the rest of each file untouched. Function heads, docs and plain
+  template text are left alone.
+* Domains and contexts become `~t` modifiers. Migrate allocates a letter (the name's first letter
+  when it's free), reuses modifiers you already defined, and adds the definitions to the
+  `use VerifiedTranslations` that gives the module `~t`:
+
+  ```elixir
+  dgettext("errors", "Payment failed")             # ~t"Payment failed"e
+  pgettext("menu", "Open")                          # ~t"Open"m
+  dngettext("errors", "1 error", "%{count} errors", n)
+  # tn(n, domain: "errors", one: "1 error", other: "%{count} errors")
+
+  use VerifiedTranslations, sigils: [modifiers: [e: [domain: "errors"], m: [context: "menu"]]]
+  ```
+* It moves each converted message's translations from `priv/gettext/*/LC_MESSAGES/<domain>.po`
+  (contexts included) into its JSON file. Placeholders are renamed to the names `~t` uses:
+  `%{name}` becomes `%{user_name}` and `%{n}` becomes `%{count}`.
+* It runs even when the project doesn't compile because translations are missing: like
+  `extract`, it compiles with verification off.
 * It removes migrated messages from the `.po` and `.pot` files unless a remaining `gettext` call
   still uses them.
 * `ngettext` becomes `tn/2`. Gettext's `msgstr[0..n]` are mapped to CLDR categories by asking
   the PO file's `Plural-Forms` rule which form it picks for a count in each category.
 * A binding that isn't a variable, assign or field keeps its Gettext name, so its msgid doesn't
   change: `name: String.upcase(u)` becomes `#{name = String.upcase(u)}`.
-* It lists the calls left on Gettext, with file and line: contexts (`pgettext`) and other
-  domains.
+* It lists the calls left on Gettext, with file and line: calls with dynamic msgids, and
+  domains or contexts in modules without a `use VerifiedTranslations` to put a modifier in.
 
 **From gettext_sigils:** migrate replaces `use GettextSigils` with `use VerifiedTranslations`
 (the options are compatible) and removes the dependency. Existing `~t` sigils produce the same
@@ -309,7 +356,8 @@ mix verified_translations.unused    # CI: fail on translation files no ~t uses (
 |---|---|
 | `extract` | compiles with verification off, creating every missing file at once |
 | `missing [--json]` | lists messages lacking a locale, without compiling. The JSON goes straight back into `put --from` |
-| `put MSGID locale=text…` | writes translations and validates locales and `%{bindings}` first. `--from file.json` (or `-` for stdin) takes many messages at once; `--domain` picks the domain |
+| `put MSGID locale=text…` | writes translations and validates locales and `%{bindings}` first. `--from file.json` (or `-` for stdin) takes many messages at once; `--domain` picks the domain; `--model` records the LLM, `--human` marks a person's work |
+| `review [--approve]` | lists unreviewed machine translations with their model, or approves them |
 | `unused [--delete]` | lists or deletes files no `~t` uses. Exits non-zero for CI |
 | `migrate` | rewrites `gettext` calls to `~t` and moves their translations (Igniter, supports `--dry-run`) |
 | `import_po` | imports all translations from Gettext `.po` files, without touching code |

@@ -23,6 +23,14 @@ defmodule Mix.Tasks.VerifiedTranslations.Put do
 
     * `--domain` - message domain, default `"default"`
     * `--from` - JSON file with many messages (`-` reads stdin)
+    * `--model` - the LLM (or machine translation service) that translated,
+      e.g. `claude-opus-5-5`; falls back to `VERIFIED_TRANSLATIONS_MODEL`.
+      Recorded in the file's `"origin"`:
+      `"origin": {"fi": {"by": "machine", "model": "claude-opus-5-5"}}`
+    * `--human` - the translations were written or checked by a person.
+      Without it they are recorded as machine translations and show up in
+      `mix verified_translations.review` until a person approves them. AI
+      agents must not pass it.
   """
 
   use Mix.Task
@@ -32,7 +40,12 @@ defmodule Mix.Tasks.VerifiedTranslations.Put do
   @impl Mix.Task
   def run(argv) do
     Mix.Task.run("loadconfig")
-    {opts, args} = OptionParser.parse!(argv, strict: [domain: :string, from: :string])
+
+    {opts, args} =
+      OptionParser.parse!(argv,
+        strict: [domain: :string, from: :string, human: :boolean, model: :string]
+      )
+
     config = Compiler.config()
     domain = Keyword.get(opts, :domain, config.domain)
 
@@ -55,9 +68,18 @@ defmodule Mix.Tasks.VerifiedTranslations.Put do
       {path, translations} =
         Map.pop(translations, "path", Message.path(config.path, domain, msgid))
 
-      Message.update!(path, msgid, translations)
+      # agents' translations stay "machine" until a human reviews them
+      origin = if opts[:human], do: nil, else: machine_origin(opts)
+      Message.update!(path, msgid, translations, origin)
       Mix.shell().info("#{path}: #{translations |> Map.keys() |> Enum.sort() |> Enum.join(", ")}")
     end)
+  end
+
+  defp machine_origin(opts) do
+    case opts[:model] || System.get_env("VERIFIED_TRANSLATIONS_MODEL") do
+      nil -> %{"by" => "machine"}
+      model -> %{"by" => "machine", "model" => model}
+    end
   end
 
   defp parse_pairs(pairs) do
@@ -76,7 +98,7 @@ defmodule Mix.Tasks.VerifiedTranslations.Put do
       {:ok, list} when is_list(list) ->
         Enum.map(list, fn
           %{"msgid" => msgid} = data when is_binary(msgid) ->
-            {msgid, Map.drop(data, ["msgid", "msgctxt", "kind", "domain", "missing"])}
+            {msgid, Map.drop(data, ["msgid", "msgctxt", "kind", "domain", "missing", "origin"])}
 
           other ->
             Mix.raise("each entry needs a \"msgid\", got: #{inspect(other)}")

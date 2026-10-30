@@ -41,6 +41,14 @@ if Code.ensure_loaded?(Igniter) do
     alias Igniter.Code.Common
     alias Sourceror.Zipper
 
+    # Igniter compiles the project before running the task. Gettext calls are
+    # verified once `use VerifiedTranslations` is in place, and migrating is
+    # exactly when translations are still missing, so compile like `extract`.
+    @impl Mix.Task
+    def run(argv) do
+      VerifiedTranslations.Compiler.without_verification(fn -> super(argv) end)
+    end
+
     @impl Igniter.Mix.Task
     def info(_argv, _composing_task) do
       %Igniter.Mix.Task.Info{

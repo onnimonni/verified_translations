@@ -78,4 +78,39 @@ defmodule VerifiedTranslations.TasksTest do
     assert content =~ ~s({\n  "kind": "plural",\n  "msgid": "%{count} files")
     assert capture_io(fn -> run("verified_translations.missing", ["--json"]) end) == "[]\n"
   end
+
+  test "put records machine origin with the model; review lists and approves", %{tmp_dir: dir} do
+    run("verified_translations.put", [
+      "Save",
+      "fi=Tallenna",
+      "sv=Spara",
+      "--model",
+      "claude-opus-5-5"
+    ])
+
+    path = Message.path(dir, "default", "Save")
+
+    assert {:ok, %{"origin" => origin}, content} = Message.read(path)
+    assert origin["fi"] == %{"by" => "machine", "model" => "claude-opus-5-5"}
+    # provenance goes after the locales
+    assert content =~ ~r/"sv": "Spara",\n  "origin"/
+
+    listed = JSON.decode!(capture_io(fn -> run("verified_translations.review", ["--json"]) end))
+
+    assert Enum.map(listed, &{&1["locale"], &1["model"]}) == [
+             {"fi", "claude-opus-5-5"},
+             {"sv", "claude-opus-5-5"}
+           ]
+
+    run("verified_translations.review", ["--approve", "--locale", "fi"])
+    {:ok, %{"origin" => origin}, _} = Message.read(path)
+    assert origin["fi"] == %{"by" => "machine", "model" => "claude-opus-5-5", "reviewed" => true}
+    assert origin["sv"]["reviewed"] == nil
+
+    # a person's edit removes the machine marker
+    run("verified_translations.put", ["Save", "sv=Spara!", "--human"])
+    {:ok, %{"origin" => origin}, _} = Message.read(path)
+    refute Map.has_key?(origin, "sv")
+    assert capture_io(fn -> run("verified_translations.review", ["--json"]) end) == "[]\n"
+  end
 end

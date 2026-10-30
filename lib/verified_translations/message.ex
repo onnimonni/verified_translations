@@ -125,8 +125,12 @@ defmodule VerifiedTranslations.Message do
       ]
       |> Enum.reject(&(&1 in [nil, false]))
 
+    # provenance goes last, after the locales
+    {origin, translations} = Map.pop(translations, "origin")
+    footer = if origin in [nil, %{}], do: [], else: [{"origin", origin}]
+
     lines =
-      Enum.map(header ++ Enum.sort(translations), fn {key, value} ->
+      Enum.map(header ++ Enum.sort(translations) ++ footer, fn {key, value} ->
         "  #{JSON.encode!(key)}: #{encode_value(value)}"
       end)
 
@@ -163,9 +167,12 @@ defmodule VerifiedTranslations.Message do
   @doc """
   Merges `translations` into the file for `msgid`, creating it if missing.
   Raises if the existing file is invalid or belongs to another msgid.
+
+  `origin` (e.g. `%{"by" => "machine", "model" => "claude-opus-5-5"}`, or `nil`
+  for human-written) is recorded for every locale in `translations`.
   """
-  @spec update!(Path.t(), String.t(), %{String.t() => String.t()}) :: :ok
-  def update!(path, msgid, translations) do
+  @spec update!(Path.t(), String.t(), map(), map() | nil) :: :ok
+  def update!(path, msgid, translations, origin \\ nil) do
     existing =
       case read(path) do
         {:ok, %{"msgid" => ^msgid} = data, _} -> data
@@ -180,7 +187,16 @@ defmodule VerifiedTranslations.Message do
       context: existing["msgctxt"]
     ]
 
-    merged = existing |> Map.drop(["msgid", "msgctxt", "kind"]) |> Map.merge(translations)
+    origins =
+      Enum.reduce(Map.keys(translations), Map.get(existing, "origin", %{}), fn locale, acc ->
+        if origin, do: Map.put(acc, locale, origin), else: Map.delete(acc, locale)
+      end)
+
+    merged =
+      existing
+      |> Map.drop(["msgid", "msgctxt", "kind", "origin"])
+      |> Map.merge(translations)
+      |> Map.put("origin", origins)
 
     File.mkdir_p!(Path.dirname(path))
     tmp = tmp_path(path)
