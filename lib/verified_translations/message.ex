@@ -37,12 +37,15 @@ defmodule VerifiedTranslations.Message do
         context -> context <> <<4>> <> msgid
       end
 
-    case opts[:plural] do
-      nil -> base
-      false -> base
-      true -> base <> <<0>> <> "N"
-      forms -> base <> <<0>> <> Enum.map_join(forms, <<0>>, fn {k, v} -> "#{k}=#{v}" end)
-    end
+    base =
+      case opts[:plural] do
+        nil -> base
+        false -> base
+        true -> base <> <<0>> <> "N"
+        forms -> base <> <<0>> <> Enum.map_join(forms, <<0>>, fn {k, v} -> "#{k}=#{v}" end)
+      end
+
+    if opts[:ordinal], do: base <> <<0>> <> "ordinal", else: base
   end
 
   # 128-bit digest: collisions are not a practical concern
@@ -116,7 +119,7 @@ defmodule VerifiedTranslations.Message do
   def encode(msgid, translations, opts \\ []) do
     header =
       [
-        opts[:plural] && {"kind", "plural"},
+        opts[:plural] && {"kind", if(opts[:ordinal], do: "ordinal", else: "plural")},
         opts[:context] && {"msgctxt", opts[:context]},
         {"msgid", msgid}
       ]
@@ -171,7 +174,12 @@ defmodule VerifiedTranslations.Message do
         {:error, reason} -> raise ArgumentError, "#{path}: #{reason}"
       end
 
-    opts = [plural: existing["kind"] == "plural", context: existing["msgctxt"]]
+    opts = [
+      plural: existing["kind"] in ["plural", "ordinal"],
+      ordinal: existing["kind"] == "ordinal",
+      context: existing["msgctxt"]
+    ]
+
     merged = existing |> Map.drop(["msgid", "msgctxt", "kind"]) |> Map.merge(translations)
 
     File.mkdir_p!(Path.dirname(path))

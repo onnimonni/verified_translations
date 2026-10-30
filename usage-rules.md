@@ -14,6 +14,10 @@ locale fails `mix compile`. Never work around that: translate the message.
   categories, e.g. Russian `one`, `few`, `many`, `other`.
 - The module needs `use VerifiedTranslations`. Phoenix web modules get it from `use MyAppWeb, :html`.
 
+- `gettext("...")`, `ngettext(...)` and the other Gettext macros are verified too and read from
+  the same JSON files, but prefer `~t`/`tn` in new code (Credo flags the macros).
+- Ordinals: `tn(n, ordinal: true, one: "%{count}st", two: "%{count}nd", few: "%{count}rd", other: "%{count}th")`.
+
 ## Translating
 
 Each message is one JSON file at `priv/translations/<domain>/<slug>-<hash>.json`. Don't create,

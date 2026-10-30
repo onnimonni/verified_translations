@@ -29,6 +29,7 @@ defmodule VerifiedTranslations.MixProject do
       {:expo, "~> 0.5 or ~> 1.0", optional: true},
       {:gettext, ">= 0.26.0", optional: true},
       {:plug, "~> 1.14", optional: true},
+      {:credo, "~> 1.7", optional: true},
       {:igniter, "~> 0.6", optional: true},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]

@@ -10,6 +10,8 @@ defmodule VerifiedTranslations.PluralTest do
     assert Plural.categories("ja") == ["other"]
     assert Plural.categories("ru") == ["one", "few", "many", "other"]
     assert Plural.categories("xx") == []
+    assert Plural.categories("en", :ordinal) == ["one", "two", "few", "other"]
+    assert Plural.categories("fi", :ordinal) == ["other"]
   end
 
   test "languages" do
@@ -54,21 +56,25 @@ defmodule VerifiedTranslations.PluralConformanceTest do
   alias VerifiedTranslations.Plural
 
   # every sample value CLDR lists for every language and category
-  test "matches CLDR's own samples" do
-    rules =
-      "priv/cldr/plurals.json"
-      |> File.read!()
-      |> JSON.decode!()
-      |> get_in(["supplemental", "plurals-type-cardinal"])
+  for {type, file} <- [cardinal: "plurals.json", ordinal: "ordinals.json"] do
+    test "matches CLDR's own #{type} samples" do
+      type = unquote(type)
 
-    failures =
-      for {lang, categories} <- rules,
-          {"pluralRule-count-" <> category, rule} <- categories,
-          sample <- samples(rule),
-          Plural.category(lang, sample) != category,
-          do: {lang, sample, category, Plural.category(lang, sample)}
+      rules =
+        "priv/cldr/#{unquote(file)}"
+        |> File.read!()
+        |> JSON.decode!()
+        |> get_in(["supplemental", "plurals-type-#{type}"])
 
-    assert failures == []
+      failures =
+        for {lang, categories} <- rules,
+            {"pluralRule-count-" <> category, rule} <- categories,
+            sample <- samples(rule),
+            Plural.category(lang, sample, type) != category,
+            do: {lang, sample, category, Plural.category(lang, sample, type)}
+
+      assert failures == []
+    end
   end
 
   defp samples(rule) do

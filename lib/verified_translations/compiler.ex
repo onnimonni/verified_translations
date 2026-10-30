@@ -66,8 +66,27 @@ defmodule VerifiedTranslations.Compiler do
         quote do: use(Gettext, backend: unquote(opts[:backend]))
       end
 
+    # gettext/ngettext/... become verified JSON lookups (opt out: gettext: false)
+    override_gettext =
+      if first? and not (Keyword.keyword?(opts) and opts[:gettext] == false) do
+        # imports are lexically scoped, so decide here rather than in an `if`
+        hide_gettext =
+          if Code.ensure_loaded?(Gettext.Macros) do
+            quote do
+              import Gettext.Macros,
+                except: unquote(VerifiedTranslations.GettextMacros.overridden())
+            end
+          end
+
+        quote do
+          unquote(hide_gettext)
+          import VerifiedTranslations.GettextMacros
+        end
+      end
+
     quote do
       unquote(use_gettext)
+      unquote(override_gettext)
 
       # a later `use VerifiedTranslations, domain: "admin"` overrides the web module's
       @__verified_translations_opts__ VerifiedTranslations.Compiler.merge_opts(
@@ -97,6 +116,7 @@ defmodule VerifiedTranslations.Compiler do
       Enum.flat_map(opts, fn
         {:backend, backend} -> [gettext_backend: backend]
         {:sigils, sigils} -> sigils
+        {:gettext, _} -> []
         {:domain, :default} -> [domain: "default"]
         other -> [other]
       end)
@@ -148,6 +168,10 @@ defmodule VerifiedTranslations.Compiler do
       )
     end
 
+    # tn(n, ordinal: true, one: "%{count}st", two: "%{count}nd", ...)
+    {ordinal?, forms} = Keyword.pop(forms, :ordinal, false)
+    type = if ordinal? == true, do: :ordinal, else: :cardinal
+
     {source_forms, bindings} =
       Enum.reduce(forms, {%{}, []}, fn {category, text}, {forms, bindings} ->
         parts =
@@ -168,12 +192,12 @@ defmodule VerifiedTranslations.Compiler do
     end
 
     source_lang = Plural.language(config.source_locale)
-    expected = Plural.categories(source_lang || "")
+    expected = Plural.categories(source_lang || "", type)
 
     if Enum.sort(Map.keys(source_forms)) != Enum.sort(expected) do
       compile_error!(
         env,
-        "tn/2 needs exactly the #{inspect(config.source_locale)} plural categories " <>
+        "tn/2 needs exactly the #{inspect(config.source_locale)} #{if type == :ordinal, do: "ordinal", else: "plural"} categories " <>
           "#{inspect(expected)}, got #{inspect(Map.keys(source_forms))}"
       )
     end
@@ -183,12 +207,124 @@ defmodule VerifiedTranslations.Compiler do
       domain: config.domain,
       context: config.context,
       plural: true,
+      type: type,
       source_forms: source_forms,
       bindings: bindings ++ [count: count]
     }
 
     compile(message, config, env)
   end
+
+  @doc false
+  # gettext/ngettext/... overrides (VerifiedTranslations.GettextMacros): same
+  # msgid and binding names as written, verified and read from JSON
+  def gettext(domain, context, msgid, msgid_plural, count, bindings, env) do
+    config = module_config(env)
+    msgid = literal!(msgid, "msgid", env)
+    msgid_plural = msgid_plural && literal!(msgid_plural, "msgid_plural", env)
+    context = context && literal!(context, "context", env)
+
+    domain =
+      case domain do
+        :default -> config.domain
+        domain -> literal!(domain, "domain", env)
+      end
+
+    plural? = msgid_plural != nil
+    texts = Enum.reject([msgid, msgid_plural], &is_nil/1)
+
+    keys =
+      texts
+      |> Enum.flat_map(&bindings_in/1)
+      |> Enum.uniq()
+      |> Kernel.--(if plural?, do: ["count"], else: [])
+
+    {bindings, prelude} = gettext_bindings(bindings, keys, env)
+    bindings = if plural?, do: Keyword.put(bindings, :count, count), else: bindings
+
+    source_forms =
+      if plural? do
+        lang = Plural.language(config.source_locale) || "en"
+
+        Map.new(Plural.categories(lang), fn
+          "one" -> {"one", msgid}
+          category -> {category, msgid_plural}
+        end)
+      end
+
+    message = %{
+      msgid: msgid_plural || msgid,
+      domain: domain,
+      context: context,
+      plural: plural?,
+      source_forms: source_forms,
+      bindings: bindings
+    }
+
+    code = compile(message, config, env)
+    if prelude, do: {:__block__, [], [prelude, code]}, else: code
+  end
+
+  # literal keyword lists are used as is; other expressions are evaluated once
+  # and each placeholder fetched from the result
+  defp gettext_bindings(ast, keys, env) do
+    if is_list(ast) and Keyword.keyword?(ast) do
+      given = Enum.map(ast, fn {key, _} -> Atom.to_string(key) end)
+
+      case keys -- given do
+        [] ->
+          {ast, nil}
+
+        [key | _] ->
+          compile_error!(
+            env,
+            "binding %{#{key}} is missing, given: #{inspect(Keyword.keys(ast))}"
+          )
+      end
+    else
+      var = Macro.unique_var(:bindings, __MODULE__)
+
+      bindings =
+        for key <- keys do
+          key = String.to_atom(key)
+          {key, quote(do: VerifiedTranslations.fetch_binding!(unquote(var), unquote(key)))}
+        end
+
+      {bindings, quote(do: unquote(var) = unquote(ast))}
+    end
+  end
+
+  defp literal!(ast, what, env) do
+    case expand_literal(ast, env) do
+      text when is_binary(text) ->
+        text
+
+      _ ->
+        compile_error!(
+          env,
+          "#{what} must be a compile-time string, got: #{Macro.to_string(ast)}. " <>
+            "Use Gettext.gettext/3 and friends for dynamic messages"
+        )
+    end
+  end
+
+  defp expand_literal(text, _env) when is_binary(text), do: text
+
+  defp expand_literal({:<>, _, [left, right]}, env) do
+    with left when is_binary(left) <- expand_literal(left, env),
+         right when is_binary(right) <- expand_literal(right, env),
+         do: left <> right
+  end
+
+  defp expand_literal({:<<>>, _, parts}, env) do
+    parts = Enum.map(parts, &expand_literal(&1, env))
+    if Enum.all?(parts, &is_binary/1), do: Enum.join(parts), else: :error
+  end
+
+  defp expand_literal({:@, _, [{name, _, ctx}]}, env) when is_atom(name) and is_atom(ctx),
+    do: Module.get_attribute(env.module, name)
+
+  defp expand_literal(_ast, _env), do: :error
 
   defp compile(message, config, env) do
     identity =
@@ -198,7 +334,7 @@ defmodule VerifiedTranslations.Compiler do
 
     path =
       config.path
-      |> Message.path(message.domain, message.msgid, context: message.context, plural: identity)
+      |> Message.path(message.domain, message.msgid, file_opts(message, identity))
       |> Path.expand()
 
     names = Enum.map(message.bindings, fn {name, _} -> Atom.to_string(name) end)
@@ -230,11 +366,21 @@ defmodule VerifiedTranslations.Compiler do
     expand(message, translations, config, env)
   end
 
+  # Message.path/encode options; ordinals are a kind of their own
+  defp file_opts(message, plural) do
+    [context: message.context, plural: plural, ordinal: type(message) == :ordinal]
+  end
+
+  defp type(message), do: Map.get(message, :type, :cardinal)
+
+  defp kind(%{plural: false}), do: nil
+  defp kind(message), do: if(type(message) == :ordinal, do: "ordinal", else: "plural")
+
   ## Loading and validating the JSON file
 
   defp load(path, message, names, config) do
     required = config.locales -- [config.source_locale]
-    opts = [context: message.context, plural: message.plural]
+    opts = file_opts(message, message.plural)
 
     case Message.read(path) do
       {:error, :enoent} ->
@@ -295,21 +441,26 @@ defmodule VerifiedTranslations.Compiler do
       end
 
     kind = if message.plural, do: :plural, else: :singular
-    PO.lookup(config.gettext_path, required, {message.domain, message.context, msgid}, kind)
+
+    # gettext has no ordinals
+    if type(message) == :ordinal,
+      do: %{},
+      else:
+        PO.lookup(config.gettext_path, required, {message.domain, message.context, msgid}, kind)
   end
 
   defp stub(required, message, _config) do
     Map.new(required, fn locale ->
       if message.plural,
-        do: {locale, Map.new(plural_categories(locale), &{&1, ""})},
+        do: {locale, Map.new(plural_categories(locale, type(message)), &{&1, ""})},
         else: {locale, ""}
     end)
   end
 
-  defp plural_categories(locale) do
+  defp plural_categories(locale, type) do
     case Plural.language(locale) do
       nil -> []
-      lang -> Plural.categories(lang)
+      lang -> Plural.categories(lang, type)
     end
   end
 
@@ -322,7 +473,7 @@ defmodule VerifiedTranslations.Compiler do
       missing ->
         data = Map.merge(data, stub(missing, message, config))
         translations = Map.drop(data, ["msgid", "msgctxt", "kind"])
-        opts = [context: message.context, plural: message.plural]
+        opts = file_opts(message, message.plural)
         File.write!(path, Message.encode(message.msgid, translations, opts))
         data
     end
@@ -341,17 +492,11 @@ defmodule VerifiedTranslations.Compiler do
           do: ["msgctxt in file is #{inspect(Map.get(data, "msgctxt"))}"],
           else: []
         ) ++
-        case {Map.get(data, "kind"), message.plural} do
-          {"plural", true} ->
-            []
-
-          {nil, false} ->
-            []
-
-          {kind, _} ->
-            [
-              "kind in file is #{inspect(kind)}, expected #{if message.plural, do: ~s("plural"), else: "none"}"
-            ]
+        case Map.get(data, "kind") do
+          kind ->
+            if kind == kind(message),
+              do: [],
+              else: ["kind in file is #{inspect(kind)}, expected #{inspect(kind(message))}"]
         end
 
     values =
@@ -361,10 +506,17 @@ defmodule VerifiedTranslations.Compiler do
 
         {locale, value} ->
           cond do
-            locale not in known -> ["unknown locale #{inspect(locale)}"]
-            message.plural -> validate_forms(locale, value, names, locale != config.source_locale)
-            not is_binary(value) -> ["#{locale} must be a string"]
-            true -> unknown_bindings(locale, value, names)
+            locale not in known ->
+              ["unknown locale #{inspect(locale)}"]
+
+            message.plural ->
+              validate_forms(locale, value, names, locale != config.source_locale, type(message))
+
+            not is_binary(value) ->
+              ["#{locale} must be a string"]
+
+            true ->
+              unknown_bindings(locale, value, names)
           end
       end)
 
@@ -384,13 +536,13 @@ defmodule VerifiedTranslations.Compiler do
 
   defp untranslated?(_), do: false
 
-  defp validate_forms(locale, forms, names, required?) do
+  defp validate_forms(locale, forms, names, required?, type) do
     case Plural.language(locale) do
       nil ->
         ["no CLDR plural rules for locale #{inspect(locale)}"]
 
       lang when is_map(forms) ->
-        expected = Plural.categories(lang)
+        expected = Plural.categories(lang, type)
         given = Map.keys(forms)
 
         cond do
@@ -446,7 +598,7 @@ defmodule VerifiedTranslations.Compiler do
 
     renderer =
       if message.plural,
-        do: {:render_plural, [index["count"]]},
+        do: {:render_plural, [index["count"], type(message)]},
         else: {:render, []}
 
     cond do
@@ -512,7 +664,7 @@ defmodule VerifiedTranslations.Compiler do
 
         _ ->
           message.source_forms ||
-            Map.new(Plural.categories(source_lang), &{&1, message.msgid})
+            Map.new(Plural.categories(source_lang, type(message)), &{&1, message.msgid})
       end
 
     default = {source_lang, Map.new(source_forms, fn {c, text} -> {c, template(text, index)} end)}

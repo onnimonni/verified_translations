@@ -15,6 +15,7 @@ defmodule Mix.Tasks.VerifiedTranslations.Install.Docs do
       bindings, in code, `~H` and `.heex`) to `~t`, moves their translations
       from `priv/gettext` into `priv/translations` and prunes the PO files
     * adds `priv/translations` to Phoenix live reload patterns
+    * enables the `VerifiedTranslations.Credo.PreferSigil` Credo check (adds Credo if missing)
 
     ## Example
 
@@ -82,6 +83,7 @@ if Code.ensure_loaded?(Igniter) do
         Enum.join(locales, ",")
       ])
       |> add_live_reload_pattern()
+      |> enable_credo_check()
       |> Igniter.add_notice("""
       verified_translations installed.
 
@@ -139,6 +141,70 @@ if Code.ensure_loaded?(Igniter) do
 
     defp add_use(content),
       do: Regex.replace(@use_gettext, content, "\\0\\1use VerifiedTranslations\n")
+
+    # Credo check flagging gettext calls that `migrate` can rewrite to ~t
+    @credo_check "{VerifiedTranslations.Credo.PreferSigil, []}"
+
+    defp enable_credo_check(igniter) do
+      igniter =
+        if Igniter.Project.Deps.has_dep?(igniter, :credo),
+          do: igniter,
+          else:
+            Igniter.Project.Deps.add_dep(
+              igniter,
+              {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
+            )
+
+      if Igniter.exists?(igniter, ".credo.exs") do
+        Igniter.update_file(igniter, ".credo.exs", fn source ->
+          content = Rewrite.Source.get(source, :content)
+
+          cond do
+            content =~ "VerifiedTranslations.Credo.PreferSigil" ->
+              source
+
+            content =~ ~r/(?:enabled|extra):\s*\[/ ->
+              updated =
+                Regex.replace(~r/((?:enabled|extra):\s*\[)/, content, "\\1\n#{@credo_check},",
+                  global: false
+                )
+
+              Rewrite.Source.update(source, :content, updated)
+
+            true ->
+              source
+          end
+        end)
+        |> then(fn igniter ->
+          content =
+            igniter.rewrite |> Rewrite.source!(".credo.exs") |> Rewrite.Source.get(:content)
+
+          if content =~ "VerifiedTranslations.Credo.PreferSigil",
+            do: igniter,
+            else:
+              Igniter.add_notice(
+                igniter,
+                "Add #{@credo_check} to the checks in .credo.exs to flag remaining gettext calls."
+              )
+        end)
+      else
+        Igniter.create_new_file(igniter, ".credo.exs", """
+        # Credo merges `extra` checks into its default configuration.
+        %{
+          configs: [
+            %{
+              name: "default",
+              checks: %{
+                extra: [
+                  #{@credo_check}
+                ]
+              }
+            }
+          ]
+        }
+        """)
+      end
+    end
 
     defp add_live_reload_pattern(igniter) do
       Enum.reduce(["config/runtime.exs", "config/dev.exs"], igniter, fn file, igniter ->

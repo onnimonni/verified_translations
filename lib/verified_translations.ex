@@ -89,6 +89,10 @@ defmodule VerifiedTranslations do
 
   `~t"#{count} file(s)"N` (gettext_sigils compatible) is the same with one
   source text for every category.
+
+  Ordinals use CLDR's ordinal categories and are stored as `"kind": "ordinal"`:
+
+      tn(place, ordinal: true, one: "%{count}st", two: "%{count}nd", few: "%{count}rd", other: "%{count}th")
   """
   defmacro tn(count, forms), do: Compiler.plural(count, forms, __CALLER__)
 
@@ -173,9 +177,18 @@ defmodule VerifiedTranslations do
 
   @doc false
   # plural runtime: {cldr_language, %{category => template}}
-  def render_plural({lang, forms}, values, count_index) do
-    category = VerifiedTranslations.Plural.category(lang, elem(values, count_index))
+  def render_plural({lang, forms}, values, count_index, type \\ :cardinal) do
+    category = VerifiedTranslations.Plural.category(lang, elem(values, count_index), type)
     render(Map.get(forms, category) || Map.fetch!(forms, "other"), values)
+  end
+
+  @doc false
+  # bindings of gettext/2 calls with non-literal bindings
+  def fetch_binding!(bindings, key) when is_map(bindings) or is_list(bindings) do
+    case Access.fetch(bindings, key) do
+      {:ok, value} -> value
+      :error -> raise ArgumentError, "missing binding %{#{key}} in #{inspect(bindings)}"
+    end
   end
 
   @doc false

@@ -1,12 +1,15 @@
 defmodule VerifiedTranslations.Plural do
   @moduledoc """
-  CLDR cardinal plural rules, compiled from the bundled
-  `priv/cldr/plurals.json` (CLDR 49, Unicode License v3).
+  CLDR plural rules, compiled from the bundled `priv/cldr/plurals.json`
+  (cardinal: 1 file, 2 files) and `priv/cldr/ordinals.json` (ordinal: 1st,
+  2nd), CLDR 49, Unicode License v3.
 
       iex> VerifiedTranslations.Plural.category("fi", 1)
       "one"
       iex> VerifiedTranslations.Plural.category("ru", 22)
       "few"
+      iex> VerifiedTranslations.Plural.category("en", 22, :ordinal)
+      "two"
       iex> VerifiedTranslations.Plural.categories("ar")
       ["zero", "one", "two", "few", "many", "other"]
 
@@ -16,33 +19,45 @@ defmodule VerifiedTranslations.Plural do
 
   alias VerifiedTranslations.Plural.Parser
 
-  @external_resource path = Path.join([__DIR__, "..", "..", "priv", "cldr", "plurals.json"])
-
   @order ~w(zero one two few many other)
+  @files [cardinal: "plurals.json", ordinal: "ordinals.json"]
 
+  for {_type, file} <- @files do
+    @external_resource Path.join([__DIR__, "..", "..", "priv", "cldr", file])
+  end
+
+  # {type, lang} => [{category, rule}]
   rules =
-    path
-    |> File.read!()
-    |> JSON.decode!()
-    |> get_in(["supplemental", "plurals-type-cardinal"])
-    |> Map.new(fn {lang, rules} ->
+    for {type, file} <- @files,
+        {lang, rules} <-
+          [__DIR__, "..", "..", "priv", "cldr", file]
+          |> Path.join()
+          |> File.read!()
+          |> JSON.decode!()
+          |> get_in(["supplemental", "plurals-type-#{type}"]),
+        into: %{} do
       categories =
         for category <- @order,
             rule = rules["pluralRule-count-#{category}"],
             do: {category, rule}
 
-      {lang, categories}
-    end)
+      {{type, lang}, categories}
+    end
 
   vars = Map.new(~w(n i v w f t c e), &{&1, Macro.var(String.to_atom(&1), __MODULE__)})
 
-  @doc "CLDR plural categories of a CLDR language, in canonical order."
-  @spec categories(String.t()) :: [String.t()]
-  for {lang, categories} <- rules do
-    def categories(unquote(lang)), do: unquote(Enum.map(categories, &elem(&1, 0)))
+  @doc """
+  CLDR plural categories of a CLDR language, in canonical order. `type` is
+  `:cardinal` (1 file, 2 files) or `:ordinal` (1st, 2nd).
+  """
+  @spec categories(String.t(), :cardinal | :ordinal) :: [String.t()]
+  def categories(lang, type \\ :cardinal)
+
+  for {{type, lang}, categories} <- rules do
+    def categories(unquote(lang), unquote(type)), do: unquote(Enum.map(categories, &elem(&1, 0)))
   end
 
-  def categories(_lang), do: []
+  def categories(_lang, _type), do: []
 
   @doc """
   The CLDR language whose rules apply to `locale` (`"pt_PT"` -> `"pt-PT"`,
@@ -56,18 +71,21 @@ defmodule VerifiedTranslations.Plural do
   end
 
   @doc "Plural category of `count` for a CLDR language (see `language/1`)."
-  @spec category(String.t(), number() | String.t() | struct()) :: String.t()
-  def category(lang, count) when is_integer(count) do
+  @spec category(String.t(), number() | String.t() | struct(), :cardinal | :ordinal) ::
+          String.t()
+  def category(lang, count, type \\ :cardinal)
+
+  def category(lang, count, type) when is_integer(count) do
     n = abs(count)
-    select(lang, n, n, 0, 0, 0, 0, 0, 0)
+    select({type, lang}, n, n, 0, 0, 0, 0, 0, 0)
   end
 
-  def category(lang, count) do
+  def category(lang, count, type) do
     {n, i, v, w, f, t} = operands(count)
-    select(lang, n, i, v, w, f, t, 0, 0)
+    select({type, lang}, n, i, v, w, f, t, 0, 0)
   end
 
-  for {lang, categories} <- rules do
+  for {key, categories} <- rules do
     clauses =
       for {category, rule} <- categories, category != "other" do
         {:->, [], [[Parser.compile(rule, vars)], category]}
@@ -75,13 +93,13 @@ defmodule VerifiedTranslations.Plural do
 
     args = Enum.map(~w(n i v w f t c e), &Map.fetch!(vars, &1))
 
-    defp select(unquote(lang), unquote_splicing(args)) do
+    defp select(unquote(Macro.escape(key)), unquote_splicing(args)) do
       _ = {unquote_splicing(args)}
       cond do: unquote(clauses ++ [{:->, [], [[true], "other"]}])
     end
   end
 
-  defp select(_lang, _n, _i, _v, _w, _f, _t, _c, _e), do: "other"
+  defp select(_key, _n, _i, _v, _w, _f, _t, _c, _e), do: "other"
 
   # operands from the decimal string representation
   defp operands(count) do
@@ -101,7 +119,9 @@ defmodule VerifiedTranslations.Plural do
     {n, i, String.length(frac), String.length(trimmed), f, t}
   end
 
-  defp to_decimal_string(count) when is_float(count), do: :erlang.float_to_binary(count, [:short])
+  defp to_decimal_string(count) when is_float(count),
+    do: :erlang.float_to_binary(count, [:short])
+
   defp to_decimal_string(count) when is_binary(count), do: count
   defp to_decimal_string(count), do: to_string(count)
 

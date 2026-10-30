@@ -116,10 +116,56 @@ Arabic and only `other` for Japanese. A missing or extra category is a compile e
 it. `tn/2` takes exactly the source locale's categories in code, and `%{count}` is its first
 argument.
 
-The CLDR 49 rules are bundled and compiled into `VerifiedTranslations.Plural`, so plurals need no
+Ordinals ("1st", "2nd", "3rd") use CLDR's ordinal rules:
+
+```elixir
+tn(place, ordinal: true, one: "%{count}st", two: "%{count}nd", few: "%{count}rd", other: "%{count}th")
+```
+
+They're stored as `"kind": "ordinal"`, and each locale must have its ordinal categories (Finnish
+has only `other`: `"%{count}."`).
+
+The CLDR 49 cardinal and ordinal rules are bundled and compiled into `VerifiedTranslations.Plural`, so plurals need no
 `ex_cldr` dependency and no backend. Every sample value CLDR publishes for every language is
 tested. Counts can be integers, floats, `Decimal`s or strings; `"1.0"` keeps its visible fraction
 digit, which some languages care about.
+
+## Gettext macros
+
+`use VerifiedTranslations` replaces Gettext's translation macros (`gettext`, `dgettext`,
+`pgettext`, `dpgettext`, `ngettext`, `dngettext`, `pngettext` and `dpngettext`) with versions that
+are verified and read from JSON exactly like `~t`. Existing code keeps working unchanged:
+
+```elixir
+gettext("Hello %{name}", name: user.name)    # msgid "Hello %{name}", verified
+ngettext("1 file", "%{count} files", n)      # same file as tn(n, one: "1 file", other: "%{count} files")
+dgettext("errors", "Not found")              # priv/translations/errors/
+pgettext("menu", "Open")                     # context "menu"
+gettext("Hi %{name}", bindings)              # bindings may be any keyword list or map
+```
+
+Msgids, domains and contexts must be compile-time strings, as Gettext requires; `<>` and
+`@attributes` work. A placeholder missing from literal bindings is a compile error.
+
+Opt out per module with `use VerifiedTranslations, gettext: false`. Runtime calls with dynamic
+msgids, such as `Gettext.dgettext(MyAppWeb.Gettext, "errors", msg)` in `translate_error/1`, keep
+using Gettext and its PO files.
+
+## Credo
+
+The installer enables a Credo check (adding Credo and creating `.credo.exs` when missing) that
+flags the Gettext macros where `~t` or `tn` reads better, with the message "Use ~t instead of
+gettext; `mix verified_translations.migrate` rewrites it." It covers Elixir code and `~H` templates.
+Credo doesn't read `.heex` files, but `migrate` rewrites those too.
+
+The check doesn't fix code itself (Credo has no autofix, and Styler takes no custom rules). The fixer
+is `mix verified_translations.migrate`, which is safe to run again at any time. To enable the
+check by hand:
+
+```elixir
+# .credo.exs
+checks: %{extra: [{VerifiedTranslations.Credo.PreferSigil, []}]}
+```
 
 ## Domains, contexts and modifiers
 
@@ -156,6 +202,7 @@ The installer:
 * adds `use VerifiedTranslations` after every `use Gettext, backend: ...` (idempotent)
 * runs `mix verified_translations.migrate` (see [Migrating from Gettext](#migrating-from-gettext))
 * adds `priv/translations` to the Phoenix live reload patterns
+* enables the `VerifiedTranslations.Credo.PreferSigil` Credo check
 
 To install manually, add `{:verified_translations, "~> 0.1"}`, the config above and
 `use VerifiedTranslations` in the `html_helpers` of `lib/my_app_web.ex`.
@@ -343,12 +390,11 @@ cd example && mix deps.get && mix test
 
 ## Limitations
 
-* Ordinal plurals ("1st", "2nd") and select/gender messages aren't supported. Use separate
-  messages with an Elixir `case`.
+* Select/gender messages aren't supported. Use separate messages with an Elixir `case`.
 * A locale switch inside a LiveView needs a remount (see [Locale](#locale)).
 * `unused --delete` doesn't support several umbrella apps sharing one translation directory.
 
 ## License
 
-MIT. The bundled CLDR plural rules (`priv/cldr/plurals.json`, CLDR 49) are under the
+MIT. The bundled CLDR plural rules (`priv/cldr/plurals.json` and `ordinals.json`, CLDR 49) are under the
 [Unicode License v3](priv/cldr/LICENSE).
