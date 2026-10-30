@@ -3,12 +3,13 @@
 #   elixir bench/generate.exs APP_DIR MODULES MSGS_PER_MODULE LOCALES MODE
 #
 # MODE is "sigil" (~t + priv/translations JSON), "gettext" (gettext/2 + PO)
-# or "gettext-split" (same, with `split_module_by: [:locale]` on the backend).
+# "gettext-split" (same, with `split_module_by: [:locale]` on the backend) or
+# "plain" (literal text, no translations: the compile-time floor).
 # Every module also uses one shared message, "Save".
 [app_dir, modules, per_module, locales, mode] = System.argv()
 {modules, per_module} = {String.to_integer(modules), String.to_integer(per_module)}
 locales = String.split(locales, ",")
-gettext? = mode != "sigil"
+gettext? = mode in ["gettext", "gettext-split"]
 
 web = app_dir |> Path.join("lib/*_web.ex") |> Path.wildcard() |> hd()
 web_module = web |> File.read!() |> then(&Regex.run(~r/defmodule (\S+) do/, &1)) |> List.last()
@@ -36,6 +37,7 @@ msg = fn m, i -> "Message #{i} of page #{m} for %{name}" end
 msgids = ["Save" | for(m <- 1..modules, i <- 1..per_module, do: msg.(m, i))]
 
 call = fn
+  text when mode == "plain" -> String.replace(text, "%{name}", "\#{@name}") |> then(&~s|"#{&1}"|)
   text when gettext? -> ~s|gettext("#{text}", name: @name)|
   text -> ~s|~t"#{String.replace(text, "%{name}", "\#{@name}")}"|
 end
@@ -97,6 +99,7 @@ if gettext? do
     ])
   end
 else
+  if mode == "plain", do: System.halt(0)
   Code.prepend_path(Path.expand("../_build/dev/lib/verified_translations/ebin", __DIR__))
 
   for text <- msgids do

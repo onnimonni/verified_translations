@@ -38,7 +38,7 @@ defmodule VerifiedTranslations.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib mix.exs README.md LICENSE .formatter.exs)
+      files: ~w(lib mix.exs README.md LICENSE .formatter.exs usage-rules.md usage-rules)
     ]
   end
 

@@ -50,6 +50,7 @@ defmodule VerifiedTranslations do
   alias VerifiedTranslations.Compiler
 
   @locale_key {__MODULE__, :locale}
+  @index_key {__MODULE__, :index}
   @gettext? Code.ensure_loaded?(Gettext)
 
   @doc false
@@ -78,6 +79,7 @@ defmodule VerifiedTranslations do
   @spec put_locale(String.t()) :: :ok
   def put_locale(locale) when is_binary(locale) do
     Process.put(@locale_key, locale)
+    Process.put(@index_key, index_of(locale))
     put_gettext_locale(locale)
     :ok
   end
@@ -117,7 +119,9 @@ defmodule VerifiedTranslations do
   @doc "Runs `fun` with `locale` as the current locale, restoring the previous one."
   @spec with_locale(String.t(), (-> result)) :: result when result: term()
   def with_locale(locale, fun) do
-    saved = Map.new([@locale_key, Gettext | gettext_backend()], &{&1, Process.get(&1)})
+    saved =
+      Map.new([@locale_key, @index_key, Gettext | gettext_backend()], &{&1, Process.get(&1)})
+
     put_locale(locale)
 
     try do
@@ -132,6 +136,42 @@ defmodule VerifiedTranslations do
 
   defp gettext_backend do
     List.wrap(Application.get_env(:verified_translations, :gettext_backend))
+  end
+
+  @doc false
+  # Runtime of ~t (see Compiler.expand/5): picks the slot or template and fills
+  # in binding values. Templates are binaries or lists of binaries and binding
+  # indexes.
+  def render(slots, index, values) when is_tuple(slots), do: render(elem(slots, index), values)
+
+  @doc false
+  def render(text, _values) when is_binary(text), do: text
+  def render(parts, values), do: parts |> fill(values) |> IO.iodata_to_binary()
+
+  defp fill([], _values), do: []
+
+  defp fill([index | rest], values) when is_integer(index),
+    do: [string(elem(values, index)) | fill(rest, values)]
+
+  defp fill([text | rest], values), do: [text | fill(rest, values)]
+
+  defp string(value) when is_binary(value), do: value
+  defp string(value), do: String.Chars.to_string(value)
+
+  @doc false
+  # Position of the current locale in `known_locales/0`; unknown locales get
+  # the last slot, which holds the source text.
+  @spec locale_index(module() | nil) :: non_neg_integer()
+  def locale_index(gettext_backend \\ nil) do
+    case Process.get(@index_key) do
+      nil -> index_of(get_locale(gettext_backend))
+      index -> index
+    end
+  end
+
+  defp index_of(locale) do
+    locales = known_locales()
+    Enum.find_index(locales, &(&1 == locale)) || length(locales)
   end
 
   @doc "Configured locales, including the source locale."

@@ -38,11 +38,12 @@ edit() { # edit MODE MSGID_PREFIX
   perl -pi -e "s/\\[(\\w+)\\] \Q$2\E/[\$1] Edited $2/" "$file"
 }
 
-for mode in gettext gettext-split sigil; do
+for mode in ${MODES:-gettext gettext-split plain sigil}; do
   elixir generate.exs "$APP" "$MODULES" "$PER_MODULE" "$LOCALES" "$mode"
   rm -rf "$APP/_build/dev/lib/bench_app"
   printf '%-14s cold compile:          %s\n' "$mode" "$(timed)"
   printf '%-14s no-op compile:         %s\n' "$mode" "$(timed)"
+  [ "$mode" = plain ] && continue
   edit "$mode" "Message 1 of page 1 for"
   printf '%-14s edit 1 translation:    %s\n' "$mode" "$(timed)"
   edit "$mode" "Save"

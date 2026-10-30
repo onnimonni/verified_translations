@@ -115,7 +115,7 @@ defmodule VerifiedTranslations.Compiler do
       end
 
     Module.put_attribute(env.module, :__verified_translations_checks__, {path, fingerprint})
-    expand(msgid, bindings, translations, config)
+    expand(msgid, bindings, translations, config, env)
   end
 
   defp load(path, msgid, names, config) do
@@ -201,62 +201,79 @@ defmodule VerifiedTranslations.Compiler do
     @binding_regex |> Regex.scan(text, capture: :all_but_first) |> List.flatten() |> Enum.uniq()
   end
 
-  # Inlines all translations: a `case` on the process locale, falling back
-  # to the source text. Bindings are evaluated once, into unique variables.
-  defp expand(msgid, bindings, translations, config) do
-    vars =
-      Map.new(bindings, fn {name, _} ->
-        {Atom.to_string(name), Macro.unique_var(name, __MODULE__)}
-      end)
-
-    assigns =
-      for {name, expr} <- bindings do
-        {:=, [generated: true], [Map.fetch!(vars, Atom.to_string(name)), expr]}
-      end
+  # Inlines the translations as one literal map of pre-parsed templates plus a
+  # call to `VerifiedTranslations.render/4`. Literals cost almost nothing to
+  # compile, unlike a `case` with string building per locale.
+  defp expand(msgid, bindings, translations, config, env) do
+    index =
+      bindings
+      |> Enum.with_index()
+      |> Map.new(fn {{name, _}, i} -> {Atom.to_string(name), i} end)
 
     source = Map.get(translations, config.source_locale, "")
-    default = render(if(source == "", do: msgid, else: source), vars)
+    default = template(if(source == "", do: msgid, else: source), index)
 
-    clauses =
-      for {locale, text} <- Enum.sort(translations),
-          locale != config.source_locale and text != "" do
-        {:->, [generated: true], [[locale], render(text, vars)]}
-      end
+    templates =
+      for {locale, text} <- translations,
+          locale != config.source_locale and text != "",
+          into: %{},
+          do: {locale, template(text, index)}
 
-    body =
-      case clauses do
-        [] ->
-          default
+    values = {:{}, [], Enum.map(bindings, fn {_, expr} -> expr end)}
+    backend = config.gettext_backend
+    global_locales = Application.compile_env(env, :verified_translations, :locales, ["en"])
 
-        _ ->
-          fallback = {:->, [generated: true], [[{:_, [], nil}], default]}
-          locale = quote(do: VerifiedTranslations.get_locale(unquote(config.gettext_backend)))
-          {:case, [generated: true], [locale, [do: clauses ++ [fallback]]]}
-      end
+    cond do
+      templates == %{} and bindings == [] ->
+        default
 
-    # variables no branch uses (e.g. omitted by a source override) are still evaluated
-    used = for {_, var} <- vars, do: quote(do: _ = unquote(var))
-    {:__block__, [], assigns ++ used ++ [body]}
+      # Fast path: a literal tuple with one slot per configured locale (plus a
+      # last slot for unknown locales), indexed by the position put_locale/1
+      # stored. compile_env keeps the compile-time and runtime order in sync.
+      config.locales == global_locales ->
+        slots =
+          List.to_tuple(Enum.map(global_locales, &Map.get(templates, &1, default)) ++ [default])
+
+        quote do
+          VerifiedTranslations.render(
+            unquote(Macro.escape(slots)),
+            VerifiedTranslations.locale_index(unquote(backend)),
+            unquote(values)
+          )
+        end
+
+      # a module overriding `locales:` cannot use the global slot order
+      true ->
+        quote do
+          VerifiedTranslations.render(
+            Map.get(
+              unquote(Macro.escape(templates)),
+              VerifiedTranslations.get_locale(unquote(backend)),
+              unquote(Macro.escape(default))
+            ),
+            unquote(values)
+          )
+        end
+    end
   end
 
-  defp render(text, vars) do
-    segments =
+  # "Hei %{name}!" -> "Hei %{name}!" parsed to ["Hei ", 0, "!"] (binding indexes);
+  # text without bindings stays a binary
+  defp template(text, index) do
+    parts =
       @binding_regex
       |> Regex.split(text, include_captures: true, trim: true)
       |> Enum.map(fn part ->
         case Regex.run(~r/^%\{([^{}\s]+)\}$/u, part, capture: :all_but_first) do
-          [name] ->
-            quote(do: String.Chars.to_string(unquote(Map.fetch!(vars, name))) :: binary)
-
-          nil ->
-            part
+          [name] -> Map.fetch!(index, name)
+          nil -> part
         end
       end)
 
-    case segments do
+    case parts do
       [] -> ""
       [literal] when is_binary(literal) -> literal
-      _ -> {:<<>>, [], segments}
+      parts -> parts
     end
   end
 

@@ -23,9 +23,9 @@ The library was built for teams running **many parallel branches, worktrees and 
 * **One JSON file per message**, holding every locale. Two branches that add different
   messages never touch the same file, so translation files don't merge-conflict. There are
   no source line references and no whole-file rewrites on extract.
-* **Translations are inlined at compile time** into the module that uses them, as a `case` on
-  the current locale. There is no runtime lookup table and no Gettext backend to recompile.
-  Editing a translation recompiles **only the modules that use that message**.
+* **Translations are inlined at compile time** into the module that uses them, as a literal
+  tuple with one slot per locale. There is no runtime lookup table and no Gettext backend to
+  recompile. Editing a translation recompiles **only the modules that use that message**.
 * **Strict and safe format.** JSON parses with Elixir's built-in `JSON` (no dependency, no code
   evaluation, no YAML-style implicit typing). Only `msgid` and configured locales are allowed as
   keys, and every value must be a string.
@@ -141,10 +141,18 @@ remounts: `push_navigate(socket, to: ~p"/settings?locale=fi")`. Processes starte
 ```sh
 # write ~t"New text" in code, then:
 mix verified_translations.extract   # creates every missing file and lists untranslated ones
-# fill in priv/translations/default/new-text-1a2b3c4d.json
+mix verified_translations.put "New text" fi="Uusi teksti" sv="Ny text"
 mix compile                         # passes once every locale is translated
 mix verified_translations.unused    # CI: fail on translation files no ~t uses (--delete removes them)
 ```
+
+| Task | Purpose |
+|---|---|
+| `extract` | compiles with verification off, creating every missing file at once |
+| `missing [--json]` | lists messages lacking a locale, without compiling. The JSON goes straight back into `put --from` |
+| `put MSGID locale=text…` | writes translations and validates locales and `%{bindings}` first. `--from file.json` (or `-` for stdin) takes many messages at once; `--domain` picks the domain |
+| `unused [--delete]` | lists or deletes files no `~t` uses. Exits non-zero for CI |
+| `import_po` | migrates translations from Gettext `.po` files |
 
 `mix compile` also creates stub files. `extract` creates them for every module in a single pass,
 including modules that would otherwise wait on a failing dependency. It also adds empty keys when
@@ -163,23 +171,52 @@ own messages plus one shared `"Save"`, which makes 5,001 msgids in 5 locales. Th
 plain Gettext, Gettext with `split_module_by: [:locale]`, and `~t`. Measured on an Apple Silicon
 laptop with Elixir 1.18, Gettext 1.0 and Phoenix 1.8:
 
-| | Gettext | Gettext, split by locale | `~t` + JSON |
-|---|---|---|---|
-| cold compile | 137.8s | 17.9s | **6.4s** |
-| no-op `mix compile` | 0.76s | 0.52s | 0.77s |
-| edit one translation | 139.5s | 16.5s | **0.97s** (1 module) |
-| edit a message used by all 200 modules | 134.0s | 16.3s | **6.3s** (200 modules) |
-| empty one translation | compiles, shows msgid | compiles, shows msgid | **compile error** |
+| | Gettext | Gettext, split by locale | `~t` + JSON | plain HEEx, no translations |
+|---|---|---|---|---|
+| cold compile | 137.8s | 17.9s | **2.5s** | 2.5s |
+| no-op `mix compile` | 0.76s | 0.52s | 0.61s | 0.48s |
+| edit one translation | 139.5s | 16.5s | **0.73s** (1 module) | |
+| edit a message used by all 200 modules | 134.0s | 16.3s | **2.4s** (200 modules) | |
+| empty one translation | compiles, shows msgid | compiles, shows msgid | **compile error** | |
 
-Gettext recompiles its backend, which holds every translation as function clauses, on any `.po`
-change. `~t` reads one small JSON file per call site and inlines the strings, and only the modules
-using a changed message recompile. At runtime each message costs one process-dictionary read and a
-`case`. When no locale is set there is also a Gettext locale lookup.
+`~t` compiles as fast as untranslated text. Gettext recompiles its backend, which holds every
+translation as function clauses, on any `.po` change. `~t` reads one small JSON file per call site
+and only the modules using a changed message recompile.
+
+Each `~t` compiles to a literal tuple with one slot per configured locale, indexed by the position
+`put_locale/1` stores. Literals cost the compiler almost nothing. An earlier version inlined a
+`case` with string building per locale, which took 6.0s cold. At runtime a static message takes
+about 21ns (the `case` took 24ns) and a message with a binding about 70ns (the `case` took 32ns).
+Modules that override `locales:` fall back to a map lookup.
 
 [`bench/formats.exs`](bench/formats.exs) parses 5,000 one-message files with 6 locales in each
 candidate format: JSON 128ms, Erlang terms 152ms, PO 175ms, Elixir literals 283ms, TOML 615ms,
 YAML 1133ms. JSON is both the fastest and the safest, since it needs no code evaluation or
 implicit typing.
+
+## AI agents
+
+The package ships [usage rules](usage-rules.md) and a pre-built
+[skill](usage-rules/skills/verified-translations/SKILL.md) for
+[usage_rules](https://hexdocs.pm/usage_rules). They teach agents the
+`extract` → `missing --json` → `put --from` → `compile` loop and to never bypass verification:
+
+```elixir
+# mix.exs of your app
+def project do
+  [
+    usage_rules: [
+      file: "AGENTS.md",
+      usage_rules: [:verified_translations],
+      skills: [package_skills: [:verified_translations]]
+    ]
+  ]
+end
+```
+
+```sh
+mix usage_rules.sync
+```
 
 ## Example app
 

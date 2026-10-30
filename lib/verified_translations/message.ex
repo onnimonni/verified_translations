@@ -84,13 +84,45 @@ defmodule VerifiedTranslations.Message do
     "{\n" <> Enum.join(lines, ",\n") <> "\n}\n"
   end
 
+  @doc "Placeholder names (`%{name}`) used in `text`."
+  @spec bindings(String.t()) :: [String.t()]
+  def bindings(text) do
+    ~r/%\{([^{}\s]+)\}/u
+    |> Regex.scan(text, capture: :all_but_first)
+    |> List.flatten()
+    |> Enum.uniq()
+  end
+
+  @doc """
+  Merges `translations` into the file for `msgid`, creating it if missing.
+  Raises if the existing file is invalid or belongs to another msgid.
+  """
+  @spec update!(Path.t(), String.t(), %{String.t() => String.t()}) :: :ok
+  def update!(path, msgid, translations) do
+    existing =
+      case read(path) do
+        {:ok, %{"msgid" => ^msgid} = data, _} -> Map.delete(data, "msgid")
+        {:ok, _, _} -> raise ArgumentError, "#{path}: msgid does not match #{inspect(msgid)}"
+        {:error, :enoent} -> %{}
+        {:error, reason} -> raise ArgumentError, "#{path}: #{reason}"
+      end
+
+    File.mkdir_p!(Path.dirname(path))
+    tmp = tmp_path(path)
+    File.write!(tmp, encode(msgid, Map.merge(existing, translations)))
+    File.rename!(tmp, path)
+  end
+
+  # unique across VMs (parallel `mix` runs in several worktrees or agents)
+  defp tmp_path(path), do: "#{path}.#{:os.getpid()}.#{System.unique_integer([:positive])}.tmp"
+
   @doc """
   Atomically creates `path` with `content` unless it exists. Returns true if
   written. Parallel compilers never see a partially written file.
   """
   @spec create(Path.t(), String.t()) :: boolean()
   def create(path, content) do
-    tmp = "#{path}.#{System.unique_integer([:positive])}.tmp"
+    tmp = tmp_path(path)
 
     with :ok <- File.mkdir_p(Path.dirname(path)),
          :ok <- File.write(tmp, content) do

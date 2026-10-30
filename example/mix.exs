@@ -10,6 +10,11 @@ defmodule Example.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
+      usage_rules: [
+        file: "AGENTS.md",
+        usage_rules: [:verified_translations],
+        skills: [package_skills: [:verified_translations]]
+      ],
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader]
     ]
@@ -66,6 +71,7 @@ defmodule Example.MixProject do
       {:gettext, "~> 1.0"},
       {:verified_translations, path: ".."},
       {:igniter, "~> 0.8", only: [:dev, :test]},
+      {:usage_rules, "~> 1.3", only: :dev},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"}
