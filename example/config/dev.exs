@@ -13,7 +13,7 @@ config :example, ExampleWeb.Endpoint,
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
-  secret_key_base: "bM9sEPsDjjcBerCu6nlBiqoW0JEmxPSF9F+Cebhd6dQrVgxtHv8o0I/OkhxpSbsV",
+  secret_key_base: "VuTZBlww1SNb05YD0fJtHy8jBw9Yf+Asb4SuVOoF9w5FSXmUmcdAAR1g7GhI3xeG",
   watchers: [
     esbuild: {Esbuild, :install_and_run, [:example, ~w(--sourcemap=inline --watch)]},
     tailwind: {Tailwind, :install_and_run, [:example, ~w(--watch)]}

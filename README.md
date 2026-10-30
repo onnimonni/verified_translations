@@ -6,14 +6,14 @@ Compile-time verified translations for Phoenix.
 the same for text, but as a hard **compile error**, like typed translation keys in TypeScript:
 
 ```heex
-<h1>{~t"Welcome, #{@user.name}!"}</h1>
+<h1>{~t"Welcome, #{@name}!"}</h1>
 ```
 
 ```
 == Compilation error in file lib/my_app_web/controllers/page_html.ex ==
 ** (CompileError) lib/my_app_web/controllers/page_html/home.html.heex:3: 1 untranslated message(s) in MyAppWeb.PageHTML:
   lib/my_app_web/controllers/page_html/home.html.heex:3: "Welcome, %{name}!": fi uses unknown %{nimi}; sv is not translated
-    priv/translations/default/welcome-name-0adeb8ce.json
+    priv/translations/default/welcome-name-0adeb8ce318553d7af0738e424d672b2.json
 ```
 
 ## Why not Gettext `.po` files?
@@ -31,7 +31,7 @@ The library was built for teams running **many parallel branches, worktrees and 
   keys, and every value must be a string.
 
 ```json
-// priv/translations/default/welcome-name-0adeb8ce.json
+// priv/translations/default/welcome-name-0adeb8ce318553d7af0738e424d672b2.json
 {
   "msgid": "Welcome, %{name}!",
   "fi": "Tervetuloa, %{name}!",
@@ -39,8 +39,9 @@ The library was built for teams running **many parallel branches, worktrees and 
 }
 ```
 
-The file name is a readable slug plus a hash of the msgid, so the sigil finds its file directly
-without an index.
+The file name is a readable slug (at most 64 bytes) plus a 128-bit hash of the msgid, so the sigil
+finds its file directly without an index. Stub files are created atomically, so parallel compilers
+never read a half-written file.
 
 ## What is verified
 
@@ -58,13 +59,16 @@ A module reports all of its failures at once.
 ```elixir
 ~t"Settings"
 ~t"Hello #{name}"                # msgid "Hello %{name}"
-~t"Hello #{@name}"               # works in HEEx and LiveView
-~t"By #{@post.author.name}"      # binding is the last field: %{name}
+~t"Hello #{@name}"               # works in HEEx and LiveView: %{name}
+~t"By #{@post.author.name}"      # full path: %{post_author_name}
+~t"#{a.name} meets #{b.name}"    # %{a_name} meets %{b_name}
+~t"Line one\nline two"           # escapes work like in strings
 ```
 
 Only variables, assigns and field access can be interpolated. Bind anything else to a variable
-first. The source text renders for the source locale and for unknown locales. To change the
-English copy without changing the code, add an `"en"` key to the file.
+first. Bindings must implement `String.Chars`. The source text renders for the source locale and
+for unknown locales. To change the English copy without changing the code, add an `"en"` key to
+the file.
 
 ## Installation
 
@@ -76,9 +80,11 @@ mix igniter.install verified_translations --locales en,fi,sv
 
 The installer:
 
-* adds `config :verified_translations, locales: [...], source_locale: "en"`
-* adds `use VerifiedTranslations` next to every `use Gettext, backend: ...`
-* rewrites plain `gettext("literal")` calls (also inside `~H` and `.heex`) to `~t"literal"`
+* adds `config :verified_translations, locales: [...], source_locale: "en", gettext_backend: ...`
+* adds `use VerifiedTranslations` after every `use Gettext, backend: ...` (idempotent)
+* rewrites `gettext("literal")` calls in Elixir code and `{gettext("literal")}` HEEx expressions
+  to `~t"literal"`, only in modules that get the sigil. Function heads, docs and plain text are
+  left alone
 * imports existing translations from `priv/gettext/*/LC_MESSAGES/*.po`
 * adds `priv/translations` to the Phoenix live reload patterns
 
@@ -92,23 +98,43 @@ config :verified_translations,
   locales: ["en", "fi", "sv"],
   source_locale: "en",            # language of the text written in ~t
   path: "priv/translations",
-  create_missing: true            # write stub files for new messages
+  create_missing: true,           # write stub files for new messages
+  gettext_backend: MyAppWeb.Gettext
 ```
 
-`use VerifiedTranslations, domain: "admin"` (and any of the keys above) overrides the config per
-module. Each domain is a subdirectory.
+Config is read with `Application.compile_env`, so changing it recompiles the callers and releases
+refuse a different runtime value. `use VerifiedTranslations, domain: "admin"` (and any of the keys
+above, including `@attributes` or `~w(...)`) overrides the config per module, even after
+`use MyAppWeb, :html`. Each domain is a subdirectory.
 
 ### Locale
 
-The locale is stored per process:
+The locale is stored per process, like Gettext's:
 
 ```elixir
 VerifiedTranslations.put_locale("fi")
 VerifiedTranslations.with_locale("sv", fn -> ~t"Hello #{name}" end)
+VerifiedTranslations.known_locales()
 ```
 
-Set it in a plug for controllers and in an `on_mount` hook for LiveViews. See
-[`example/lib/example_web/plugs/locale.ex`](example/lib/example_web/plugs/locale.ex).
+`put_locale/1` also sets the Gettext locale, so remaining `gettext`/`ngettext` calls and
+`translate_error/1` render in the same language. When `put_locale/1` was never called, `~t`
+follows the Gettext locale, so apps that already set it keep working.
+
+```elixir
+# router.ex: ?locale=fi, remembered in the session
+plug VerifiedTranslations.Plug
+
+live_session :default, on_mount: VerifiedTranslations.LiveView do
+  ...
+end
+```
+
+LiveView change tracking doesn't re-render expressions that use no assigns. That covers
+`{~t"Settings"}`, just like `{gettext("Settings")}`, and it can't be changed from a macro because
+HEEx analyzes templates before macros expand. To switch locale inside a LiveView, navigate so it
+remounts: `push_navigate(socket, to: ~p"/settings?locale=fi")`. Processes started with `Task` or
+`assign_async` don't inherit the locale; call `put_locale/1` in them.
 
 ## Workflow
 
@@ -121,34 +147,45 @@ mix verified_translations.unused    # CI: fail on translation files no ~t uses (
 ```
 
 `mix compile` also creates stub files. `extract` creates them for every module in a single pass,
-including modules that would otherwise wait on a failing dependency.
+including modules that would otherwise wait on a failing dependency. It also adds empty keys when
+you configure a new locale. Modules compiled during extraction are always recompiled and verified
+afterwards, including in the same `mix do ...` run. In umbrella projects the tasks run per
+application.
+
+`mix verified_translations.import_po` migrates existing Gettext translations from the `default`
+domain (`--domain errors` to add more). It never overwrites translations that already exist, and it
+aborts when an existing file is invalid.
 
 ## Performance
 
-[`bench/run.sh`](bench/run.sh) generates a Phoenix app with 200 LiveView-style modules × 25
-messages (5,000 msgids) × 5 locales, then compares plain Gettext with `~t`. Measured on an Apple
-Silicon laptop:
+[`bench/run.sh`](bench/run.sh) generates a Phoenix app with 200 HEEx modules. Each module uses 25
+own messages plus one shared `"Save"`, which makes 5,001 msgids in 5 locales. The script compares
+plain Gettext, Gettext with `split_module_by: [:locale]`, and `~t`. Measured on an Apple Silicon
+laptop with Elixir 1.18, Gettext 1.0 and Phoenix 1.8:
 
-| | Gettext (`gettext/2` + `.po`) | `~t` + JSON |
-|---|---|---|
-| cold compile | 122.5s | **5.9s** |
-| no-op `mix compile` | 0.66s | 0.66s |
-| edit one translation | 123.0s (whole Gettext backend) | **0.86s** (only the module using it) |
-| empty one translation | compiles, falls back to msgid at runtime | **compile error** |
+| | Gettext | Gettext, split by locale | `~t` + JSON |
+|---|---|---|---|
+| cold compile | 137.8s | 17.9s | **6.4s** |
+| no-op `mix compile` | 0.76s | 0.52s | 0.77s |
+| edit one translation | 139.5s | 16.5s | **0.97s** (1 module) |
+| edit a message used by all 200 modules | 134.0s | 16.3s | **6.3s** (200 modules) |
+| empty one translation | compiles, shows msgid | compiles, shows msgid | **compile error** |
 
-Most of Gettext's time goes into compiling its backend, which turns every translation into a
-function clause. `~t` reads one ~24µs JSON file per call site and inlines the strings. At runtime
-each message costs one process-dictionary read and a `case`.
+Gettext recompiles its backend, which holds every translation as function clauses, on any `.po`
+change. `~t` reads one small JSON file per call site and inlines the strings, and only the modules
+using a changed message recompile. At runtime each message costs one process-dictionary read and a
+`case`. When no locale is set there is also a Gettext locale lookup.
 
-Parsing 5,000 message files with 6 locales each, by format: JSON 118ms, Erlang terms 156ms,
-PO 158ms, Elixir literals 219ms, TOML 587ms, YAML 1316ms. JSON is both the fastest and the
-safest, since it needs no code evaluation or implicit typing.
+[`bench/formats.exs`](bench/formats.exs) parses 5,000 one-message files with 6 locales in each
+candidate format: JSON 128ms, Erlang terms 152ms, PO 175ms, Elixir literals 283ms, TOML 615ms,
+YAML 1133ms. JSON is both the fastest and the safest, since it needs no code evaluation or
+implicit typing.
 
 ## Example app
 
 [`example/`](example/) is a fresh `mix phx.new` app with
 `mix verified_translations.install --locales en,fi,sv` applied, plus translated home-page text and
-a `?locale=fi` plug.
+`plug VerifiedTranslations.Plug`.
 
 ```sh
 cd example && mix deps.get && mix test
@@ -157,7 +194,8 @@ cd example && mix deps.get && mix test
 ## Limitations
 
 * No plurals or `msgctxt` yet. Keep using `ngettext` for plurals.
-* The locale is per process. LiveViews need it set in `on_mount`.
+* A locale switch inside a LiveView needs a remount (see [Locale](#locale)).
+* `unused --delete` doesn't support several umbrella apps sharing one translation directory.
 
 ## License
 

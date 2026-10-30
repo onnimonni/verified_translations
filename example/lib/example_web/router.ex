@@ -8,7 +8,7 @@ defmodule ExampleWeb.Router do
     plug :put_root_layout, html: {ExampleWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
-    plug ExampleWeb.Plugs.Locale
+    plug VerifiedTranslations.Plug
   end
 
   pipeline :api do

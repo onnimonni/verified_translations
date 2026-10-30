@@ -41,14 +41,15 @@ defmodule VerifiedTranslationsTest do
     assert VerifiedTranslations.with_locale("de", fn -> module.run("Onni", nil) end) ==
              "Hello Onni"
 
-    assert VerifiedTranslations.get_locale() == nil
+    # unset: falls back to Gettext's locale
+    assert VerifiedTranslations.get_locale() == Gettext.get_locale()
   end
 
   test "field access bindings and source locale override", %{tmp_dir: dir} do
-    put(dir, "By %{name}", %{
-      "en" => "Written by %{name}",
-      "fi" => "%{name} kirjoitti",
-      "sv" => "Av %{name}"
+    put(dir, "By %{user_name}", %{
+      "en" => "Written by %{user_name}",
+      "fi" => "%{user_name} kirjoitti",
+      "sv" => "Av %{user_name}"
     })
 
     module = compile!(dir, ~S|~t"By #{user.name}"|)
@@ -111,6 +112,45 @@ defmodule VerifiedTranslationsTest do
     assert compile_error(dir, ~S|~t"Hi %{name}"|) =~ "literal %{name}"
   end
 
+  test "file without msgid is rejected", %{tmp_dir: dir} do
+    path = Message.path(dir, "default", "Anon")
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, ~s({"fi": "x", "sv": "y"}))
+    assert compile_error(dir, ~S|~t"Anon"|) =~ "msgid is missing"
+  end
+
+  test "unicode and ?/! variable names", %{tmp_dir: dir} do
+    put(dir, "Hi %{käyttäjä} %{ready?}", %{"fi" => "Moi %{käyttäjä} %{ready?}", "sv" => "Hej"})
+    module = compile!(dir, ~S|(käyttäjä = name; ready? = user; ~t"Hi #{käyttäjä} #{ready?}")|)
+
+    assert VerifiedTranslations.with_locale("fi", fn -> module.run("Onni", true) end) ==
+             "Moi Onni true"
+  end
+
+  test "use options are evaluated and a later domain overrides", %{tmp_dir: dir} do
+    path = Message.path(dir, "admin", "Admin only")
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, Message.encode("Admin only", %{"fi" => "Vain admin"}))
+    module = Module.concat(__MODULE__, "Opts#{System.unique_integer([:positive])}")
+
+    Code.compile_string("""
+    defmodule #{inspect(module)} do
+      @dir #{inspect(dir)}
+      use VerifiedTranslations, path: @dir, locales: ~w(en fi sv)
+      use VerifiedTranslations, domain: "admin", locales: ~w(en fi)
+      def run, do: ~t"Admin only"
+    end
+    """)
+
+    assert VerifiedTranslations.with_locale("fi", fn -> module.run() end) == "Vain admin"
+  end
+
+  test "locale syncs with and falls back to Gettext" do
+    VerifiedTranslations.with_locale("fi", fn -> assert Gettext.get_locale() == "fi" end)
+    refute Gettext.get_locale() == "fi"
+    Gettext.with_locale("sv", fn -> assert VerifiedTranslations.get_locale() == "sv" end)
+  end
+
   test "only configured locales are required", %{tmp_dir: dir} do
     put(dir, "Only fi", %{"fi" => "Vain suomi"})
     assert compile!(dir, ~S|~t"Only fi"|, ~S|, locales: ["en", "fi"]|)
@@ -140,15 +180,30 @@ defmodule VerifiedTranslationsTest do
     test "variables, assigns and field access" do
       assert parse(~S|Hi #{name}|) == {"Hi %{name}", [:name]}
       assert parse(~S|Hi #{@name}|) == {"Hi %{name}", [:name]}
-      assert parse(~S|Hi #{@user.name} #{post.title}|) == {"Hi %{name} %{title}", [:name, :title]}
+
+      assert parse(~S|Hi #{@user.name} #{post.title}|) ==
+               {"Hi %{user_name} %{post_title}", [:user_name, :post_title]}
+
+      assert parse(~S|#{a.name} and #{b.name}|) ==
+               {"%{a_name} and %{b_name}", [:a_name, :b_name]}
+
+      assert parse(~S|Line\nbreak|) == {"Line\nbreak", []}
       assert parse(~S|#{a} and #{a}|) == {"%{a} and %{a}", [:a]}
     end
   end
 
   test "file names are readable, stable and unique" do
-    assert Message.file_name("Hello %{name}!") =~ ~r/^hello-name-[0-9a-f]{8}\.json$/
-    assert Message.file_name("Hyvää päivää") =~ ~r/^hyvää-päivää-[0-9a-f]{8}\.json$/
+    assert Message.file_name("Hello %{name}!") =~ ~r/^hello-name-[0-9a-f]{32}\.json$/
+    assert Message.file_name("Hyvää päivää") =~ ~r/^hyvää-päivää-[0-9a-f]{32}\.json$/
     refute Message.file_name("Hello") == Message.file_name("hello")
-    assert Message.file_name("!!!") =~ ~r/^[0-9a-f]{8}\.json$/
+    assert Message.file_name("!!!") =~ ~r/^[0-9a-f]{32}\.json$/
+
+    # collided with the old 8 character hash
+    a = String.duplicate("a", 48)
+    refute Message.file_name(a <> " 9343") == Message.file_name(a <> " 81140")
+
+    # long and unicode text stays well below the 255 byte limit
+    assert byte_size(Message.file_name(String.duplicate("각", 48))) < 120
+    assert byte_size(Message.file_name(String.duplicate("x", 500))) < 120
   end
 end

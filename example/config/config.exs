@@ -7,7 +7,10 @@
 # General application configuration
 import Config
 
-config :verified_translations, locales: ["en", "fi", "sv"], source_locale: "en"
+config :verified_translations,
+  locales: ["en", "fi", "sv"],
+  source_locale: "en",
+  gettext_backend: ExampleWeb.Gettext
 
 config :example,
   generators: [timestamp_type: :utc_datetime]
@@ -21,7 +24,7 @@ config :example, ExampleWeb.Endpoint,
     layout: false
   ],
   pubsub_server: Example.PubSub,
-  live_view: [signing_salt: "A/WbTj8Y"]
+  live_view: [signing_salt: "GOv9NGJ1"]
 
 # Configure LiveView
 config :phoenix_live_view,

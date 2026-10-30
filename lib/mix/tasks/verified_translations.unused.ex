@@ -5,18 +5,23 @@ defmodule Mix.Tasks.VerifiedTranslations.Unused do
 
       mix verified_translations.unused           # list, exit 1 if any (for CI)
       mix verified_translations.unused --delete  # delete them
+
+  In an umbrella project it runs in each application. Applications sharing
+  one translation directory are not supported by `--delete`.
   """
 
   use Mix.Task
 
   alias VerifiedTranslations.Compiler
 
+  @recursive true
+
   @impl Mix.Task
   def run(argv) do
     {opts, _} = OptionParser.parse!(argv, strict: [delete: :boolean])
     Mix.Task.run("compile")
 
-    app = Mix.Project.config()[:app]
+    app = Mix.Project.config()[:app] || Mix.raise("could not determine the application")
     Application.load(app)
 
     used =
@@ -28,7 +33,7 @@ defmodule Mix.Tasks.VerifiedTranslations.Unused do
           do: Path.expand(path)
 
     unused =
-      Compiler.config([]).path
+      Compiler.config().path
       |> Path.join("**/*.json")
       |> Path.wildcard()
       |> Enum.reject(&MapSet.member?(used, Path.expand(&1)))
